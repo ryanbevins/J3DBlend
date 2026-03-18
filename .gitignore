@@ -1,0 +1,8 @@
+# python cache stuff
+__pycache__/
+*.py[co]
+
+
+# Sphinx documentation
+docs/_build/
+
