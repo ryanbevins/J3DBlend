@@ -445,6 +445,8 @@ class Bck_out:
                 print('Unknown fcurve array index "{0}"!'.format(f.array_index))
                 return
 
+        if x_track is None or y_track is None or z_track is None:
+            return
         value, handle_left, handle_right = self.get_track_keyframe(x_track, y_track, z_track, frame)
         if value is None:
             return
@@ -515,6 +517,8 @@ class Bck_out:
                 print('Unknown fcurve array index "{0}"!'.format(f.array_index))
                 return
 
+        if x_track is None or y_track is None or z_track is None:
+            return
         value, handle_left, handle_right = self.get_track_keyframe(x_track, y_track, z_track, frame)
         if value is None:
             return
@@ -586,6 +590,8 @@ class Bck_out:
                 print('Unknown fcurve array index "{0}"!'.format(f.array_index))
                 return
 
+        if x_track is None or y_track is None or z_track is None:
+            return
         value, handle_left, handle_right = self.get_track_keyframe(x_track, y_track, z_track, frame, is_scale=True)
         if value is None:
             return
