@@ -350,6 +350,14 @@ class Bck_out:
             gc_ry = b.bone.get("gc_rest_ry", 0.0)
             gc_rz = b.bone.get("gc_rest_rz", 0.0)
             gc_rest_quat = mathutils.Euler((gc_rx, gc_ry, gc_rz), 'XYZ').to_quaternion()
+            # GC rest pose rotation matrix (forward, not inverted)
+            gc_rest_rotmtx = mathutils.Euler((gc_rx, gc_ry, gc_rz), 'XYZ').to_matrix().to_4x4()
+            # GC rest pose translation
+            gc_rest_t = mathutils.Vector((
+                b.bone.get("gc_rest_tx", 0.0),
+                b.bone.get("gc_rest_ty", 0.0),
+                b.bone.get("gc_rest_tz", 0.0),
+            ))
 
             joint_anim = BckJointAnim()
             fcurve_path = 'pose.bones["{0}"]'.format(b.name)
@@ -359,7 +367,7 @@ class Bck_out:
             scale_fcurves = [fcu for fcu in all_fcurves if fcu.data_path.startswith(fcurve_path + ".scale")]
 
             for f in range(self.maxframe + 1):
-              self.process_translation_track(trans_fcurves, f, joint_anim, local_rotation, local_matrix)
+              self.process_translation_track(trans_fcurves, f, joint_anim, gc_rest_rotmtx, gc_rest_t)
               self.process_rotation_track(rot_fcurves, f, joint_anim, gc_rest_quat)
               self.process_scale_track(scale_fcurves, f, joint_anim)
 
@@ -421,7 +429,7 @@ class Bck_out:
 
         return (keyframe_value, tangent_left, tangent_right)
 
-    def process_translation_track(self, curves, frame, anim, local_rotation, local_matrix):
+    def process_translation_track(self, curves, frame, anim, gc_rest_rotmtx, gc_rest_t):
         x_track = None
         y_track = None
         z_track = None
@@ -441,9 +449,12 @@ class Bck_out:
         if value is None:
             return
 
-        value = local_matrix @ mathutils.Vector(value)
-        handle_left = local_rotation @ mathutils.Vector(handle_left)
-        handle_right = local_rotation @ mathutils.Vector(handle_right)
+        # Import did: y -= jnt_frame.t, then y = inverted_rotmtx @ y
+        # Export reverses: y = rotmtx @ y, then y += jnt_frame.t
+        value = gc_rest_rotmtx @ mathutils.Vector(value)
+        value += gc_rest_t
+        handle_left = gc_rest_rotmtx @ mathutils.Vector(handle_left)
+        handle_right = gc_rest_rotmtx @ mathutils.Vector(handle_right)
 
         x_bck_key = BckKey()
         x_bck_key.time = frame

@@ -466,11 +466,14 @@ def apply_animation(bones, arm_obj, jntframes, name=None):
         else:
             posebone.rotation_mode = "XZY"  # remember, coords are flipped
 
-        # Store GC rest-pose euler angles as custom properties for BCK export
+        # Store GC rest-pose as custom properties for BCK export
         refpos = com.jnt_frame
         posebone.bone["gc_rest_rx"] = refpos.rx
         posebone.bone["gc_rest_ry"] = refpos.ry
         posebone.bone["gc_rest_rz"] = refpos.rz
+        posebone.bone["gc_rest_tx"] = refpos.t.x
+        posebone.bone["gc_rest_ty"] = refpos.t.y
+        posebone.bone["gc_rest_tz"] = refpos.t.z
 
         bonecurves = {'location': [None,None,None], 'rotation_euler':[None,None,None], 'scale': [None,None,None]}
         all_curves[name] = bonecurves
