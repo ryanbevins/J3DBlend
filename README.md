@@ -1,16 +1,16 @@
 # J3DBlend
 
-Blender 5.0 addon for importing and exporting Nintendo GameCube J3D formats — BMD/BDL models and BCK skeletal animations.
+Blender 5.0 addon for importing and exporting Nintendo GameCube J3D formats -BMD/BDL models and BCK skeletal animations.
 
 Fork of [blemd](https://github.com/niacdoial/blemd) by niacdoial, updated for Blender 5.0 with a fully working BCK animation export pipeline.
 
 ## What's New (vs blemd)
 
-- **Blender 5.0 support** — uses the new layered action API for animation import/export
-- **Working BCK export** — animations round-trip perfectly: import → edit in Blender → export → game
-- **Fixed coordinate conversion** — GC Y-up ↔ Blender Z-up transform uses exact JNT1 rest pose data stored as bone custom properties, not Blender's internal matrix representation
-- **Fixed translation export** — proper GC-space rotation matrix + rest position offset for all bones including deep hierarchy children
-- **Robust export** — handles bones with missing keyframe channels (location/rotation/scale)
+- **Blender 5.0 support** -uses the new layered action API for animation import/export
+- **Working BCK export** -animations round-trip perfectly: import → edit in Blender → export → game
+- **Fixed coordinate conversion** -GC Y-up ↔ Blender Z-up transform uses exact JNT1 rest pose data stored as bone custom properties, not Blender's internal matrix representation
+- **Fixed translation export** -proper GC-space rotation matrix + rest position offset for all bones including deep hierarchy children
+- **Robust export** -handles bones with missing keyframe channels (location/rotation/scale)
 
 ## Supported Formats
 
@@ -57,7 +57,7 @@ root/
 
 ### Export BCK Animation
 
-1. Select the armature (must have been imported via BMD import — the GC rest pose data is stored on the bones)
+1. Select the armature (must have been imported via BMD import -the GC rest pose data is stored on the bones)
 2. File → Export → Nintendo BCK
 3. The active action or NLA strip will be exported
 
@@ -73,7 +73,7 @@ root/
 
 ## How the BCK Export Works
 
-BCK files store **absolute** joint rotations (not deltas from rest pose). The game's J3D engine reads BCK values and directly replaces the rest pose — there's no additive blending.
+BCK files store **absolute** joint rotations (not deltas from rest pose). The game's J3D engine reads BCK values and directly replaces the rest pose -there's no additive blending.
 
 The export pipeline:
 1. Reads Blender fcurves (bone rotation mode: XZY)
@@ -84,9 +84,8 @@ The export pipeline:
 
 ## Credits
 
-- **niacdoial** — original blemd addon (BMD import, BCK import, BCK export framework)
-- **ryanbevins** — Blender 5.0 fixes, BCK export coordinate conversion fixes
+- **niacdoial** - original blemd addon
 
 ## License
 
-GPL v3 — same as the original blemd. See [LICENSE](LICENSE).
+GPL v3 -same as the original blemd. See [LICENSE](LICENSE).
