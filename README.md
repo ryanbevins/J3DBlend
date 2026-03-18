@@ -1,145 +1,92 @@
-# Welcome to BleMD.
-This project goal is to import Nintendo Gamecube/Wii ".bmd" and ".bdl" 3D models,
-using [Blender](https://blender.org).
+# J3DBlend
 
+Blender 5.0 addon for importing and exporting Nintendo GameCube J3D formats — BMD/BDL models and BCK skeletal animations.
 
-## project structure, and advice for anyone willing to tinker with the code: see dev_notes.md
+Fork of [blemd](https://github.com/niacdoial/blemd) by niacdoial, updated for Blender 5.0 with a fully working BCK animation export pipeline.
 
-## HISTORY: *moved to HISTORY.md*
+## What's New (vs blemd)
 
-# FAQ:
+- **Blender 5.0 support** — uses the new layered action API for animation import/export
+- **Working BCK export** — animations round-trip perfectly: import → edit in Blender → export → game
+- **Fixed coordinate conversion** — GC Y-up ↔ Blender Z-up transform uses exact JNT1 rest pose data stored as bone custom properties, not Blender's internal matrix representation
+- **Fixed translation export** — proper GC-space rotation matrix + rest position offset for all bones including deep hierarchy children
+- **Robust export** — handles bones with missing keyframe channels (location/rotation/scale)
 
-### Help, BleMD freezes when I import a file
+## Supported Formats
 
-First, make sure you are trying to import a file from a gamecube/wii game.
-There are other kinds of `.bmd`/`.bdl` files, but those other files cannot be imported by BleMD
-in particular, *BleMD cannot import files from minecraft mods such as pixelmon* (…mentioning this here because it's the only other file encountered in this project's issues)
+| Format | Import | Export |
+|--------|--------|--------|
+| BMD (Binary Model) | ✅ | ❌ (planned) |
+| BDL (Binary Display List) | ✅ | ❌ |
+| BCK (Bone Animation) | ✅ | ✅ |
+| BTK (Texture Animation) | ✅ | ❌ |
+| BTP (Texture Pattern) | ✅ | ❌ |
 
-Then, know that importing a lot of animations (which is done by default) is really slow. You can disable this in the options that show up in the import dialog, and it should be faster. If it still takes more than 5min (for very large models on ancient hardware), then you can try and contact us.
+## Installation
 
-# How to use BleMD?
-summary:
-- How to install?
-- How to obtain a `.bmd` file from a game (with the use of other tools)?
-- How are the the animations handled?
-- How are the imaged handled?
-- Misc. troubleshooting.
+1. Download this repo as a ZIP
+2. In Blender: Edit → Preferences → Add-ons → Install from Disk
+3. Select the ZIP file
+4. Enable "Import-Export: BleMD" in the addon list
 
-## how to install?
-
-To install BleMD, you first need to have Blender itself installed. (It is recommended to install from [The official site](https://blender.org or your [Package manager](https://en.wikipedia.org/wiki/Package_manager)).
-The version of BleMD distributed with this manual works for Blender versions from 2.8 onwards, and was tested with 2.83, 3.0.1 and 3.1.0.
-
-Once blender is installed (or at least unzipped), you will need to put the contents of BleMD in the correct place yourself.
-
-For this, download the contents of the repository in a zip file, and put the folder inside it into one of the following paths:
-- `"<path to blender>/<version>/scripts/addons_contrib/"`
-- `"<path to blender>/<version>/scripts/addons/"`
-- `~/.config/blender/<version>/scripts/addons_contrib/"` (GNU/Linux)
-- `~/.config/blender/<version>/scripts/addons/"` (GNU/Linux)
-- `"C:/Users/<username>/AppData/Roaming/Blender Foundation/blender/<version>/scripts/addons_contrib/"` (Windows)
-- `"C:/Users/<username>/AppData/Roaming/Blender Foundation/blender/<version>/scripts/addons/"` (Windows)
-
-(Notes: you might need to run Blender at least once to create some of theses paths, and the `<version>` might be truncated: for example `3.0` for blender 3.0.1.)
-
-Then, ensure that the folder you just moved, containing the addon (which might be called `blemd-master`),
-**must** be called `"blemd"`.
-
-From there, you will be able to enable it in the add-ons tab of the settings (`file->user settings->addons`).
-For now to enable it, you need to first find it (click on the `testing` category, and scroll down to find it),
-then enable it using the checkbox to the right of the tile representing the addon.
-
-## How to obtain a `.bmd` file from a game (with the use of other tools)?
-
-First, you will need a file that contains the entire game
-(you can do it by using this method (http://wiibrew.org/wiki/CleanRip) if you have a Wii or Gamecube and bought a game:
-*to my knowledge, it is the only legal method, if/where it even is.*)
-
-Then, extract the contents of the game and put the result into a folder.
-Dolphin emulator (at https://dolphin-emu.org) does the job just fine, but you have to find the procedure to do it.
-Note: If you are not your PC's admin and your PC's OS is Windows, you will need to already have the 2015-2019 64-bit version of
-[Microsoft Visual C++ redistributable libraries](https://www.microsoft.com/en-us/download/details.aspx?id=48145)
-(most recent PCs have it)
-
-Afterwards, extract the `.arc/.rarc/.szs` archives (at `/res/Object`, `/data` or `/ObjectData` in the game folder) with [SZS Tools](http://www.amnoid.de/gc/szstools.zip) (Full program with docs there!) or [Switch Toolbox](https://github.com/KillzXGaming/Switch-Toolbox)
-to run SZS Tools, you will need the 32 [bit Microsoft Visual C++ 2005 Redistributable Package (x86)](http://go.microsoft.com/fwlink/?linkid=65127). 
-Don't panic, quite a lot of PCs have it.
-If you're not using Windows, use [this](https://github.com/jamchamb/ARCTool) instead: 
-to run it, you will need [Python](https://www.python.org/downloads/).
-```bash
-# Extract .arc/.rarc
-python ARCTool.py <.arc/.rarc> [-o OutputDirectoryName]
-# If you didn't specify output name, it will extract to <original.(r)arc>.extracted/
+**Or** manually copy the folder to:
+```
+Windows: %APPDATA%/Blender Foundation/Blender/5.0/scripts/addons/
+Linux:   ~/.config/blender/5.0/scripts/addons/
 ```
 
-Then, with blender on your PC, and BleMD 'installed', you have two methods:
-- You can open Blender, and use `File->Import->Nintendo BMD/BDL`. Then select the correct file with the file explorer
-and, if you want to, change the options in the right pane.
-- Otherwise, you can use `automated-converter`. More instructions are given in the corresponding subfolder.
+The addon folder **must** be named `blemd-master` or `blemd`.
 
-## How are the the animations handled?
+## Usage
 
-The first thing you need to know is that animations are *not stored in the* `.bmd` *file,
-and there might be multiple animation files.* (`.bck` usually).
+### Import BMD + Animations
 
-Therefor, this program will only detect them if directory structure of the original `.arc` archives is respected:
+1. File → Import → Nintendo BMD/BDL
+2. Select a `.bmd` file
+3. BCK animations are auto-detected from sibling `bck/` folder
 
+Expected directory structure:
 ```
 root/
- |bmd/
- | |foo.bmd
- | |bar.bmd
- | |...
- |
- |bck/
- | |animation.bck
- | |another animation.bck
- | |
+  bmd/
+    model.bmd
+  bck/
+    animation1.bck
+    animation2.bck
 ```
-,
 
-```
-root/
- |bmd/
- | |foo.bmd
- | |bar.bmd
- | |...
- |
- |bcks/
- | |animation.bck
- | |another animation.bck
- | |
-```
-or
-```
-root/
- |foo.bmd
- |bar.bmd
- |animation.bck
- |another animation.bck
-```
-(While the `root/` abd `bmd/` folders and the files can have any name, the `bck/` folder must be named "bck", "bcks" or "scrn")
+### Export BCK Animation
 
-*Animations can be excluded from import* If you move them from this spot or change the file extention.
+1. Select the armature (must have been imported via BMD import — the GC rest pose data is stored on the bones)
+2. File → Export → Nintendo BCK
+3. The active action or NLA strip will be exported
 
-## How are the images handled?
-Unlike everything else in the `bmd` file, images first have to be written elsewhere to be used, and this is done by
-a small program, included with the BleMD "core". However, this small program is an native executable, making it hard to get working for Mac OS.
+**For new animations:** Duplicate an existing imported animation action, then modify the poses. This ensures all bones have keyframes on all channels. If creating from scratch, make sure every bone has Location + Rotation + Scale keyframes.
 
-The `image importing subprocess` subfolder contains a couple versions of this file (V1 and V2 are older and might be broken),
-plus the source code, so the program can be recompiled for other platforms.
-To change the used executable, you will need to replace the one in the main folder (called `bmdview.exe` or `bmdview.lin`).
+### Repacking into the Game
 
-Moreover, this small program is not aware of what exact image formats (such as `dds file/8-bit greyscale` or `tga file/256 color palette/32bit rgb+alpha`) blender can use,
-but offers you the possibility to use `.tga` or `.dds` as an image container:
-switching from one to the other help fix some problems.
+1. Export your BCK from Blender
+2. Open the game's `.szs` archive in [GCFT](https://github.com/LagoLunatic/GCFT)
+3. Replace the original BCK with your exported one
+4. Save the archive
+5. Rebuild the ISO with [pyisotools](https://github.com/JoshuaMKW/pyisotools)
 
+## How the BCK Export Works
 
+BCK files store **absolute** joint rotations (not deltas from rest pose). The game's J3D engine reads BCK values and directly replaces the rest pose — there's no additive blending.
 
-## Misc. troubleshooting.
+The export pipeline:
+1. Reads Blender fcurves (bone rotation mode: XZY)
+2. Applies axis un-swap: Blender (x, -z, y) → GC (x, y, z)
+3. Rotates by GC rest pose quaternion (stored during import as bone custom properties `gc_rest_rx/ry/rz`)
+4. For translation: applies GC rest rotation matrix then adds rest position (`gc_rest_tx/ty/tz`)
+5. Converts radians to s16 fixed-point and writes BCK binary
 
-There are two systems put in place to look at the program's logs:
-- one will only record warnings and errors, and will show up as a pop-up when the plugin finishes.
-- the other is much more verbose, and wil show up on the system console.
+## Credits
 
-Please include a screenshot of the console (and the blender viewport if necessary) when reporting any kind of error.
+- **niacdoial** — original blemd addon (BMD import, BCK import, BCK export framework)
+- **ryanbevins** — Blender 5.0 fixes, BCK export coordinate conversion fixes
+
+## License
+
+GPL v3 — same as the original blemd. See [LICENSE](LICENSE).
