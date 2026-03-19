@@ -562,7 +562,7 @@ class Shp1:
         return None
 
     @staticmethod
-    def _get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_set_to_drw,
+    def _get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_set_to_drw_candidates,
                                       bone_to_any_weighted_drw, vgroup_to_bone_idx):
         """Get the correct DRW1 index for a vertex in a weighted batch.
 
@@ -588,11 +588,28 @@ class Shp1:
             if g in vgroup_to_bone_idx
         )
 
-        # Exact match on bone set only — subset matching finds wrong envelopes
-        # with different weights, causing vertices to fly to wrong positions.
-        drw = bone_set_to_drw.get(bone_indices)
-        if drw is not None:
-            return drw
+        # Find DRW entry matching bone set AND closest weights.
+        # Multiple DRW entries can share the same bone set with different weights.
+        candidates = bone_set_to_drw_candidates.get(bone_indices)
+        if candidates:
+            if len(candidates) == 1:
+                return candidates[0][0]
+            # Build vertex weight map for comparison
+            vert_weights = {}
+            for vg_idx, w in sig_groups:
+                bi = vgroup_to_bone_idx.get(vg_idx)
+                if bi is not None:
+                    vert_weights[bi] = w
+            # Pick candidate with smallest total weight difference
+            best_drw = candidates[0][0]
+            best_diff = float('inf')
+            for drw_idx, cand_weights in candidates:
+                diff = sum(abs(vert_weights.get(bi, 0) - cand_weights.get(bi, 0))
+                          for bi in set(vert_weights) | set(cand_weights))
+                if diff < best_diff:
+                    best_diff = diff
+                    best_drw = drw_idx
+            return best_drw
 
         # Fallback: rigid entry for heaviest bone. This applies a single bone
         # transform which is approximately correct (in the right neighborhood).
@@ -741,7 +758,7 @@ class Shp1:
         return [unknown, min_x, min_y, min_z, max_x, max_y, max_z]
 
     @staticmethod
-    def _split_into_packets(triangles, mesh, vgroup_to_drw, bone_set_to_drw, bone_to_any_weighted_drw, vgroup_to_bone_idx, max_bones=10):
+    def _split_into_packets(triangles, mesh, vgroup_to_drw, bone_set_to_drw_candidates, bone_to_any_weighted_drw, vgroup_to_bone_idx, max_bones=10):
         """Split triangles into packets, each using at most max_bones unique DRW1 indices.
 
         Returns list of (tri_list, drw_index_list) tuples.
@@ -752,7 +769,7 @@ class Shp1:
             bones = set()
             for vi in lt.vertices:
                 vert = mesh.vertices[vi]
-                drw_idx = Shp1._get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_set_to_drw, bone_to_any_weighted_drw, vgroup_to_bone_idx)
+                drw_idx = Shp1._get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_set_to_drw_candidates, bone_to_any_weighted_drw, vgroup_to_bone_idx)
                 bones.add(drw_idx)
             tri_bones.append((lt, bones))
 
@@ -859,18 +876,21 @@ class Shp1:
                         log.info("  vgroup[%d] '%s' -> bone_idx=%d -> no rigid DRW1 entry",
                                  vg.index, vg.name, bone_idx)
 
-        # Build weighted DRW1 lookup: maps frozenset of bone indices -> DRW1 index.
-        # This finds the correct weighted DRW entry for multi-bone vertices by
-        # matching their bone combination against EVP1 envelopes.
-        bone_set_to_drw = {}  # frozenset(bone_indices) -> DRW1 index
+        # Build weighted DRW1 lookup: maps frozenset of bone indices -> list of
+        # (DRW1_index, {bone_idx: weight}) candidates. Multiple DRW entries can
+        # share the same bone set but have different weight distributions.
+        # We pick the closest weight match for each vertex.
+        bone_set_to_drw_candidates = {}  # frozenset(bone_indices) -> [(drw_idx, {bone: weight}), ...]
         bone_to_any_weighted_drw = {}  # single bone_idx -> first weighted DRW1 that references it
         if has_armature and evp1 is not None:
             for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
                 if isW and data_val < len(evp1.weightedIndices):
                     mm = evp1.weightedIndices[data_val]
                     bone_key = frozenset(mm.indices)
-                    bone_set_to_drw[bone_key] = di
-                    # Also map individual bones to this weighted DRW as fallback
+                    weight_map = {mm.indices[i]: mm.weights[i] for i in range(len(mm.indices))}
+                    if bone_key not in bone_set_to_drw_candidates:
+                        bone_set_to_drw_candidates[bone_key] = []
+                    bone_set_to_drw_candidates[bone_key].append((di, weight_map))
                     for bi in mm.indices:
                         if bi not in bone_to_any_weighted_drw:
                             bone_to_any_weighted_drw[bi] = di
@@ -989,7 +1009,7 @@ class Shp1:
                 else:
                     # Split into packets by bone limit (max 10 DRW1 entries per packet)
                     packet_splits = Shp1._split_into_packets(
-                        triangles, mesh, vgroup_to_drw, bone_set_to_drw,
+                        triangles, mesh, vgroup_to_drw, bone_set_to_drw_candidates,
                         bone_to_any_weighted_drw, vgroup_to_bone_idx, max_bones=10)
 
                     batch.packets = []
@@ -1018,7 +1038,7 @@ class Shp1:
                                 # Matrix index: local_index * 3
                                 vert = mesh.vertices[vert_idx]
                                 drw_idx = Shp1._get_vert_drw_index_weighted(
-                                    vert, vgroup_to_drw, bone_set_to_drw,
+                                    vert, vgroup_to_drw, bone_set_to_drw_candidates,
                                     bone_to_any_weighted_drw, vgroup_to_bone_idx)
                                 local_idx = local_mtx_map.get(drw_idx, 0)
                                 point.matrixIndex = local_idx * 3
