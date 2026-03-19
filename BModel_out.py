@@ -179,10 +179,16 @@ def reconstruct_mesh_sections(bmodel):
     batch_order = [blender_mat for _, blender_mat in batch_mat_order]
     log.info("INF1 batch->material order: %s", batch_order)
 
-    # Reconstruct VTX1 — computes per-vertex inverse skinning matrix from
-    # vertex groups. Single-bone → inv(bone_matrix). Multi-bone → inv(blended_matrix).
+    # Pre-compute per-vertex DRW assignments so VTX1 and SHP1 agree
+    # on which transform each vertex uses.
+    vert_drw, mat_classification = Shp1.Shp1.PrecomputeVertexDRW(
+        mesh_obj, drw, evp, batch_order)
+    log.info("Pre-computed DRW assignments for %d vertices", len(vert_drw))
+
+    # Reconstruct VTX1 — uses DRW assignments for inverse skinning so that
+    # positions are consistent with the runtime transform SHP1 will apply.
     new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(
-        mesh_obj, jnt=jnt, drw=drw, evp=evp)
+        mesh_obj, jnt=jnt, drw=drw, evp=evp, vert_drw=vert_drw)
     if hasattr(bmodel.vtx, 'arrayFormats') and bmodel.vtx.arrayFormats:
         new_vtx.arrayFormats = bmodel.vtx.arrayFormats
     if hasattr(bmodel.vtx, '_formatSentinel'):

@@ -642,7 +642,7 @@ class Vtx1:
 
 
     @staticmethod
-    def FromBlenderMesh(mesh_obj, jnt=None, drw=None, evp=None):
+    def FromBlenderMesh(mesh_obj, jnt=None, drw=None, evp=None, vert_drw=None):
         """Reconstruct VTX1 data from a Blender mesh object.
 
         Extracts positions, normals, UVs, and vertex colors from the Blender mesh,
@@ -653,6 +653,11 @@ class Vtx1:
         of the transform used during import:
         - Rigid vertices: inverse of bone world matrix (bone-local space)
         - Weighted vertices: inverse of blended skinning matrix (bind/model space)
+
+        When vert_drw is provided (from Shp1.PrecomputeVertexDRW), the inverse
+        skinning uses the ACTUAL DRW entry that SHP1 will assign at runtime.
+        This ensures positions are consistent with the runtime transform.
+        vert_drw: dict mapping vertex_index -> (drw_idx, is_weighted, data_val)
 
         Returns a new Vtx1 instance with populated pools and arrayFormats.
 
@@ -679,14 +684,16 @@ class Vtx1:
         # During import, each vertex was transformed by a skinning matrix:
         #   blender_pos = skinning_matrix @ vtx1_pos
         #
-        # For rigid vertices (single bone):
+        # For rigid DRW entries:
         #   skinning_matrix = bone_world_matrix
-        # For weighted vertices (multi-bone):
-        #   skinning_matrix = sum(weight_i * LocalMatrix(jnt, bone_i) @ evp.matrices[bone_i])
+        # For weighted DRW entries:
+        #   skinning_matrix = sum(evp_weight_i * bone_world[evp_bone_i] @ evp.inverseBind[evp_bone_i])
         #
         # To export, we reverse: vtx1_pos = inv(skinning_matrix) @ blender_pos
         #
-        # This is computed from vertex groups for ALL vertices — no special cases.
+        # CRITICAL: The inverse skinning must use the same transform that the
+        # DRW entry will apply at runtime. If vert_drw is provided, we use it
+        # to ensure consistency between VTX1 positions and SHP1 matrix assignments.
         #
         vert_bone_inv_matrix = {}  # blender vert index -> inverse matrix (4x4)
         has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
@@ -716,42 +723,76 @@ class Vtx1:
                         # No EVP data: just use bone world matrix directly
                         bone_skin_component[bi] = jnt.frames[bi].matrix
 
-            for vi, vert in enumerate(mesh.vertices):
-                if not vert.groups:
-                    continue
+            if vert_drw is not None and evp is not None:
+                # DRW-aware inverse skinning: use the actual DRW entry's transform
+                for vi, vert in enumerate(mesh.vertices):
+                    drw_info = vert_drw.get(vi)
+                    if drw_info is None:
+                        continue
 
-                # Collect significant bone groups
-                sig_groups = []
-                for g in vert.groups:
-                    bi = vgroup_to_bone_idx.get(g.group)
-                    if bi is not None and g.weight > 0.001:
-                        sig_groups.append((bi, g.weight))
+                    drw_idx, is_weighted, data_val = drw_info
 
-                if not sig_groups:
-                    continue
+                    if not is_weighted:
+                        # Rigid DRW: use bone world matrix
+                        bone_idx = data_val
+                        if bone_idx < len(jnt.frames) and jnt.frames[bone_idx].matrix is not None:
+                            try:
+                                vert_bone_inv_matrix[vi] = jnt.frames[bone_idx].matrix.inverted()
+                            except ValueError:
+                                pass
+                    else:
+                        # Weighted DRW: use EVP envelope's bones and weights
+                        evp_idx = data_val
+                        if evp_idx < len(evp.weightedIndices):
+                            mm = evp.weightedIndices[evp_idx]
+                            m = MathMatrix()
+                            m.zero()
+                            for i in range(len(mm.indices)):
+                                bi = mm.indices[i]
+                                w = mm.weights[i]
+                                comp = bone_skin_component.get(bi)
+                                if comp is not None:
+                                    Mat44.Mad(m, comp, w)
+                            m[3][3] = 1.0
+                            try:
+                                vert_bone_inv_matrix[vi] = m.inverted()
+                            except ValueError:
+                                pass
+            else:
+                # Fallback: compute from vertex groups (original behavior)
+                for vi, vert in enumerate(mesh.vertices):
+                    if not vert.groups:
+                        continue
 
-                if len(sig_groups) == 1:
-                    # Single bone — use bone world matrix directly (faster, more precise)
-                    bi = sig_groups[0][0]
-                    mat = jnt.frames[bi].matrix if bi < len(jnt.frames) else None
-                    if mat is not None:
+                    sig_groups = []
+                    for g in vert.groups:
+                        bi = vgroup_to_bone_idx.get(g.group)
+                        if bi is not None and g.weight > 0.001:
+                            sig_groups.append((bi, g.weight))
+
+                    if not sig_groups:
+                        continue
+
+                    if len(sig_groups) == 1:
+                        bi = sig_groups[0][0]
+                        mat = jnt.frames[bi].matrix if bi < len(jnt.frames) else None
+                        if mat is not None:
+                            try:
+                                vert_bone_inv_matrix[vi] = mat.inverted()
+                            except ValueError:
+                                pass
+                    else:
+                        m = MathMatrix()
+                        m.zero()
+                        for bi, w in sig_groups:
+                            comp = bone_skin_component.get(bi)
+                            if comp is not None:
+                                Mat44.Mad(m, comp, w)
+                        m[3][3] = 1.0
                         try:
-                            vert_bone_inv_matrix[vi] = mat.inverted()
+                            vert_bone_inv_matrix[vi] = m.inverted()
                         except ValueError:
                             pass
-                else:
-                    # Multiple bones — compute blended skinning matrix and invert
-                    m = MathMatrix()
-                    m.zero()
-                    for bi, w in sig_groups:
-                        comp = bone_skin_component.get(bi)
-                        if comp is not None:
-                            Mat44.Mad(m, comp, w)
-                    m[3][3] = 1.0
-                    try:
-                        vert_bone_inv_matrix[vi] = m.inverted()
-                    except ValueError:
-                        pass
 
         # --- Positions (full deduplication) ---
         pos_map = {}

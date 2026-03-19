@@ -561,6 +561,9 @@ class Shp1:
             return drw_idx
         return None
 
+    _drw_fallback_count = 0
+    _drw_fallback_logged = 0
+
     @staticmethod
     def _get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_set_to_drw_candidates,
                                       bone_to_any_weighted_drw, vgroup_to_bone_idx):
@@ -611,8 +614,52 @@ class Shp1:
                     best_drw = drw_idx
             return best_drw
 
-        # Fallback: rigid entry for heaviest bone. This applies a single bone
-        # transform which is approximately correct (in the right neighborhood).
+        # DEBUG: log fallback cases
+        Shp1._drw_fallback_count += 1
+        if Shp1._drw_fallback_logged < 30:
+            Shp1._drw_fallback_logged += 1
+            bone_names_str = sorted(bone_indices) if bone_indices else "empty"
+            all_groups = [(g.group, g.weight, vgroup_to_bone_idx.get(g.group, '?'))
+                         for g in vert.groups]
+            avail_sets = [sorted(bs) for bs in bone_set_to_drw_candidates.keys()]
+            log.warning("DRW FALLBACK #%d: vert %d, %d sig_groups, bone_set=%s, "
+                       "all_groups=%s, available_sets=%s",
+                       Shp1._drw_fallback_count, vert.index, len(sig_groups),
+                       bone_names_str, all_groups, avail_sets[:10])
+
+        # Fallback: find the BEST matching EVP envelope by bone set similarity,
+        # rather than falling back to rigid (which creates a transform mismatch).
+        # Strategy: find the envelope whose bone set has the most overlap with
+        # the vertex's bone set, weighted by the vertex's bone weights.
+        if bone_indices and bone_set_to_drw_candidates:
+            best_drw = None
+            best_score = -1
+            for cand_bones, cand_list in bone_set_to_drw_candidates.items():
+                overlap = bone_indices & cand_bones
+                if not overlap:
+                    continue
+                # Score = sum of vertex weights for overlapping bones
+                score = sum(w for g, w in sig_groups
+                           if g in vgroup_to_bone_idx and vgroup_to_bone_idx[g] in overlap)
+                if score > best_score:
+                    best_score = score
+                    # Pick the candidate with closest weights from this bone set
+                    vert_weights = {}
+                    for vg_idx, w in sig_groups:
+                        bi = vgroup_to_bone_idx.get(vg_idx)
+                        if bi is not None:
+                            vert_weights[bi] = w
+                    best_diff = float('inf')
+                    for drw_idx, cand_weights in cand_list:
+                        diff = sum(abs(vert_weights.get(bi, 0) - cand_weights.get(bi, 0))
+                                  for bi in set(vert_weights) | set(cand_weights))
+                        if diff < best_diff:
+                            best_diff = diff
+                            best_drw = drw_idx
+            if best_drw is not None:
+                return best_drw
+
+        # Last resort fallback: rigid entry for heaviest bone
         if sig_groups:
             best_vg = max(sig_groups, key=lambda x: x[1])[0]
             rigid = vgroup_to_drw.get(best_vg)
@@ -626,6 +673,110 @@ class Shp1:
                     return drw
 
         return 0
+
+    @staticmethod
+    def PrecomputeVertexDRW(mesh_obj, drw1, evp1, batch_order):
+        """Pre-compute per-vertex DRW1 assignment for all vertices.
+
+        This determines, for each vertex, whether it will use a rigid or
+        weighted DRW entry, and which one. Both VTX1 (inverse skinning)
+        and SHP1 (matrix indices) must use the same assignment.
+
+        Returns:
+            vert_drw: dict mapping blender vertex index -> drw1 index (or None)
+            mat_classification: dict mapping material_index -> (is_rigid, drw_idx, bone_idx)
+        """
+        mesh = mesh_obj.data
+        mesh.calc_loop_triangles()
+
+        has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
+                        and mesh_obj.parent.type == 'ARMATURE')
+
+        bone_names = []
+        vgroup_to_drw = {}
+        vgroup_to_bone_idx = {}
+        bone_set_to_drw_candidates = {}
+        bone_to_any_weighted_drw = {}
+
+        if has_armature and mesh_obj.vertex_groups:
+            arm_obj = mesh_obj.parent
+            bone_names = [b.name for b in arm_obj.data.bones]
+
+            # Rigid DRW mapping: vgroup -> DRW1 rigid entry
+            for vg in mesh_obj.vertex_groups:
+                if vg.name in bone_names:
+                    bone_idx = bone_names.index(vg.name)
+                    vgroup_to_bone_idx[vg.index] = bone_idx
+                    for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
+                        if not isW and data_val == bone_idx:
+                            vgroup_to_drw[vg.index] = di
+                            break
+
+            # Weighted DRW mapping: bone set -> DRW1 weighted candidates
+            if evp1 is not None:
+                for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
+                    if isW and data_val < len(evp1.weightedIndices):
+                        mm = evp1.weightedIndices[data_val]
+                        bone_key = frozenset(mm.indices)
+                        weight_map = {mm.indices[i]: mm.weights[i]
+                                     for i in range(len(mm.indices))}
+                        if bone_key not in bone_set_to_drw_candidates:
+                            bone_set_to_drw_candidates[bone_key] = []
+                        bone_set_to_drw_candidates[bone_key].append((di, weight_map))
+                        for bi in mm.indices:
+                            if bi not in bone_to_any_weighted_drw:
+                                bone_to_any_weighted_drw[bi] = di
+
+        # Classify materials (rigid vs weighted)
+        mat_triangles = {}
+        for lt in mesh.loop_triangles:
+            mi = lt.material_index
+            if mi not in mat_triangles:
+                mat_triangles[mi] = []
+            mat_triangles[mi].append(lt)
+
+        mat_classification = {}
+        for mat_idx in (batch_order if batch_order else sorted(mat_triangles.keys())):
+            triangles = mat_triangles.get(mat_idx, [])
+            is_rigid, drw_idx = Shp1._classify_batch_majority(
+                mesh, triangles, vgroup_to_drw)
+            if is_rigid and drw_idx is not None and drw_idx < len(drw1.data):
+                bone_idx = drw1.data[drw_idx]
+                mat_classification[mat_idx] = (True, drw_idx, bone_idx)
+            else:
+                mat_classification[mat_idx] = (False, None, None)
+
+        # Compute per-vertex DRW assignment
+        # For rigid batches: all vertices use the batch's single DRW entry
+        # For weighted batches: each vertex gets its own DRW via envelope matching
+        vert_drw = {}  # vert_index -> (drw_idx, is_weighted_drw, evp_idx_or_bone_idx)
+
+        for mat_idx, (is_rigid, batch_drw, batch_bone) in mat_classification.items():
+            triangles = mat_triangles.get(mat_idx, [])
+            seen = set()
+            for lt in triangles:
+                for vi in lt.vertices:
+                    if vi in seen:
+                        continue
+                    seen.add(vi)
+
+                    if is_rigid:
+                        # All verts in rigid batch use the batch bone
+                        vert_drw[vi] = (batch_drw, False, batch_bone)
+                    else:
+                        # Weighted: find best DRW for this vertex
+                        vert = mesh.vertices[vi]
+                        drw_idx = Shp1._get_vert_drw_index_weighted(
+                            vert, vgroup_to_drw, bone_set_to_drw_candidates,
+                            bone_to_any_weighted_drw, vgroup_to_bone_idx)
+                        if drw_idx is not None and drw_idx < len(drw1.isWeighted):
+                            is_w = drw1.isWeighted[drw_idx]
+                            data_val = drw1.data[drw_idx]
+                            vert_drw[vi] = (drw_idx, bool(is_w), data_val)
+                        else:
+                            vert_drw[vi] = (0, False, 0)
+
+        return vert_drw, mat_classification
 
     @staticmethod
     def ClassifyMaterials(mesh_obj, drw1, batch_order):
