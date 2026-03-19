@@ -354,6 +354,15 @@ class BModel:
             log.error('Normals weren\'t set (error is %s)', err)
         modelMesh.update()
 
+        # Store VTX1 array format descriptors on the mesh object for BMD export
+        if hasattr(self.vtx, 'arrayFormats'):
+            for i, af in enumerate(self.vtx.arrayFormats):
+                if af is not None:
+                    prefix = "gc_vtx_fmt%d_" % i
+                    modelObject[prefix + "arrayType"] = af.arrayType
+                    modelObject[prefix + "componentCount"] = af.componentCount
+                    modelObject[prefix + "dataType"] = af.dataType
+                    modelObject[prefix + "decimalPoint"] = af.decimalPoint
 
         return modelObject
 
@@ -753,6 +762,61 @@ class BModel:
             if self._currMaterial is not None:  # mat.texStages[0] != 0xffff:  # do it if any texture has been made
                 # XCX is that the good condition?
                 self._currMaterial.name = self._mat1.stringtable[n.index]
+
+                # Store GC material data as custom properties for BMD export
+                self._currMaterial["gc_mat_index"] = self._mat1.indexToMatIndex[n.index]
+                self._currMaterial["gc_mat_flag"] = mat.flag
+                self._currMaterial["gc_mat_cullIndex"] = mat.cullIndex
+                self._currMaterial["gc_mat_numChansIndex"] = mat.numChansIndex
+                self._currMaterial["gc_mat_texGenCountIndex"] = mat.texGenCountIndex
+                self._currMaterial["gc_mat_tevCountIndex"] = mat.tevCountIndex
+                self._currMaterial["gc_mat_zModeIndex"] = mat.zModeIndex
+                self._currMaterial["gc_mat_color1"] = list(mat.color1)
+                self._currMaterial["gc_mat_chanControls"] = list(mat.chanControls)
+                self._currMaterial["gc_mat_color2"] = list(mat.color2)
+                self._currMaterial["gc_mat_lights"] = list(mat.lights)
+                self._currMaterial["gc_mat_texGenInfos"] = list(mat.texGenInfos)
+                self._currMaterial["gc_mat_texGenInfos2"] = list(mat.texGenInfos2)
+                self._currMaterial["gc_mat_texMtxInfos"] = list(mat.texMtxInfos)
+                self._currMaterial["gc_mat_dttMtxInfos"] = list(mat.dttMtxInfos)
+                self._currMaterial["gc_mat_texStages"] = list(mat.texStages)
+                self._currMaterial["gc_mat_color3"] = list(mat.color3)
+                self._currMaterial["gc_mat_constColorSel"] = list(mat.constColorSel)
+                self._currMaterial["gc_mat_constAlphaSel"] = list(mat.constAlphaSel)
+                self._currMaterial["gc_mat_tevOrderInfo"] = list(mat.tevOrderInfo)
+                self._currMaterial["gc_mat_colorS10"] = list(mat.colorS10)
+                self._currMaterial["gc_mat_tevStageInfo"] = list(mat.tevStageInfo)
+                self._currMaterial["gc_mat_tevSwapModeInfo"] = list(mat.tevSwapModeInfo)
+                self._currMaterial["gc_mat_tevSwapModeTable"] = list(mat.tevSwapModeTable)
+                self._currMaterial["gc_mat_alphaCompIndex"] = list(mat.alphaCompIndex)
+                self._currMaterial["gc_mat_blendIndex"] = list(mat.blendIndex)
+                self._currMaterial["gc_mat_indices2"] = list(mat.indices2)
+
+                # Store texture header data for each referenced texture
+                for texIdx in range(8):
+                    stage = mat.texStages[texIdx]
+                    if stage != 0xffff and stage < len(self._mat1.texStageIndexToTextureIndex):
+                        texTableIdx = self._mat1.texStageIndexToTextureIndex[stage]
+                        if texTableIdx < len(self.tex.texHeaders):
+                            th = self.tex.texHeaders[texTableIdx]
+                            prefix = "gc_tex%d_" % texIdx
+                            self._currMaterial[prefix + "name"] = self.tex.stringtable[texTableIdx]
+                            self._currMaterial[prefix + "format"] = th.format
+                            self._currMaterial[prefix + "width"] = th.width
+                            self._currMaterial[prefix + "height"] = th.height
+                            self._currMaterial[prefix + "wrapS"] = th.wrapS
+                            self._currMaterial[prefix + "wrapT"] = th.wrapT
+                            self._currMaterial[prefix + "unknown"] = th.unknown
+                            self._currMaterial[prefix + "unknown3"] = th.unknown3
+                            self._currMaterial[prefix + "paletteFormat"] = th.paletteFormat
+                            self._currMaterial[prefix + "paletteNumEntries"] = th.paletteNumEntries
+                            self._currMaterial[prefix + "paletteOffset"] = th.paletteOffset
+                            self._currMaterial[prefix + "unknown5"] = th.unknown5
+                            self._currMaterial[prefix + "unknown6"] = th.unknown6
+                            self._currMaterial[prefix + "unknown7"] = th.unknown7
+                            self._currMaterial[prefix + "mipmapCount"] = th.mipmapCount
+                            self._currMaterial[prefix + "unknown8"] = th.unknown8
+                            self._currMaterial[prefix + "unknown9"] = th.unknown9
 
                 while self._currMaterialIndex >= len(self._subMaterials):
                     self._subMaterials.append(None)

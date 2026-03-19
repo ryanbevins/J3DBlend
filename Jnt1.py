@@ -163,6 +163,12 @@ class JntFrame:
         self._bbMin = e.bbMin  # is this even needed? (bounding box)
         self._bbMax = e.bbMax
 
+        # Store raw JntEntry fields for round-trip BMD export
+        self.matrix_type = e.unknown  # u16: 0, 1, or 2
+        self.jnt_pad = e.pad          # u16: usually 0x00ff
+        self.jnt_pad2 = e.pad2        # u16: usually 0xffff
+        self.jnt_unknown2 = e.unknown2  # f32: unknown float after tz
+
 
     def getFrameMatrix(self):
         return Matrix.Translation(self.t) @ Euler((self.rx, self.ry, self.rz), 'XYZ').to_matrix().to_4x4()

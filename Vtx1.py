@@ -376,6 +376,9 @@ class Vtx1:
             af = ArrayFormat()
             af.LoadData(br)
             formats.append(af)
+        # Store array formats for BMD export round-tripping
+        self.arrayFormats = [None] * 13
+
         # -- read arrays
         br.SeekSet(vtx1Offset + header.arrayFormatOffset)  # ? returns back?
 
@@ -383,6 +386,7 @@ class Vtx1:
         for i in range(13):
             if header.offsets[i]:
                 f = formats[j]
+                self.arrayFormats[i] = f
                 len = header.GetLength(i)
                 # print("Vert "+str(i)+":"+str(len))
                 if f.arrayType >= 0xd:  # UV coords
