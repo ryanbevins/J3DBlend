@@ -94,19 +94,21 @@ class JntEntry:
         self.rz = round(f.rz * 32768./pi)
 
         self.tx, self.ty, self.tz = f.t.xyz
-        self.bbMin = f._bbMin
-        self.bbMax = f._bbMax
+        self.bbMin = f._bbMin if f._bbMin else [0.0, 0.0, 0.0]
+        self.bbMax = f._bbMax if f._bbMax else [0.0, 0.0, 0.0]
 
-        self.unknown = 0x00  # correct value unknown
-        self.pad = 0x00ff  # or 0x0000 ??
-        self.pad2 = 0xffff
+        # Use round-trip fields from import if available, otherwise defaults
+        self.unknown = getattr(f, 'matrix_type', 0)
+        self.pad = getattr(f, 'jnt_pad', 0x00ff)
+        self.pad2 = getattr(f, 'jnt_pad2', 0xffff)
+        self.unknown2 = getattr(f, 'jnt_unknown2', 0.0)
 
     def DumpData(self, bw):
         # values flipped late
-        bw.WriteWORD(self.unknown)
+        bw.writeWord(self.unknown)
         # no idea how this works...always 0, 1 or 2.
         # "matrix type" according to yaz0r - whatever this means ;-)
-        bw.WriteWORD(self.pad)
+        bw.writeWord(self.pad)
         # always 0x00ff in mario, but not in zelda
         bw.writeFloat(self.sx)
         bw.writeFloat(self.sy)
@@ -116,7 +118,7 @@ class JntEntry:
         bw.writeShort(self.ry)
         bw.writeShort(self.rz)
 
-        bw.WriteWORD(self.pad2)  # always 0xffff
+        bw.writeWord(self.pad2)  # always 0xffff
 
         bw.writeFloat(self.tx)  # translation floats
         bw.writeFloat(self.ty)
@@ -182,6 +184,49 @@ class Jnt1:
     def __init__(self):  # GENERATED!
         self.frames = []  # base position of bones, used as a reference to compute animations as a difference to this
 
+    def FromArmature(self, arm_obj):
+        """Populate JNT1 frames from Blender armature using gc_ custom properties."""
+        self.frames = []
+        self.matrices = []
+        self.isMatrixValid = []
+
+        for bone in arm_obj.data.bones:
+            f = JntFrame()
+            f.name = bone.name
+
+            # Read GC rest-pose from custom properties stored during import
+            f.rx = bone.get("gc_rest_rx", 0.0)
+            f.ry = bone.get("gc_rest_ry", 0.0)
+            f.rz = bone.get("gc_rest_rz", 0.0)
+            f.t = Vector((
+                bone.get("gc_rest_tx", 0.0),
+                bone.get("gc_rest_ty", 0.0),
+                bone.get("gc_rest_tz", 0.0),
+            ))
+            f.sx = bone.get("gc_rest_sx", 1.0)
+            f.sy = bone.get("gc_rest_sy", 1.0)
+            f.sz = bone.get("gc_rest_sz", 1.0)
+
+            f._bbMin = [
+                bone.get("gc_bb_min_x", 0.0),
+                bone.get("gc_bb_min_y", 0.0),
+                bone.get("gc_bb_min_z", 0.0),
+            ]
+            f._bbMax = [
+                bone.get("gc_bb_max_x", 0.0),
+                bone.get("gc_bb_max_y", 0.0),
+                bone.get("gc_bb_max_z", 0.0),
+            ]
+
+            f.matrix_type = bone.get("gc_matrix_type", 0)
+            f.jnt_pad = bone.get("gc_jnt_pad", 0x00ff)
+            f.jnt_pad2 = bone.get("gc_jnt_pad2", 0xffff)
+            f.jnt_unknown2 = bone.get("gc_jnt_unknown2", 0.0)
+
+            self.frames.append(f)
+            self.matrices.append(None)
+            self.isMatrixValid.append(False)
+
     def LoadData(self, br):
 
         jnt1Offset = br.Position()
@@ -235,7 +280,7 @@ class Jnt1:
         header.DumpData(bw)
         bw.writePadding(header.jntEntryOffset - Jnt1Header.size)
 
-        if bw.Position != jnt1Offset + header.jntEntryOffset:
+        if bw.Position() != jnt1Offset + header.jntEntryOffset:
             raise ValueError('incorrect lengths in writing Jnt1')
 
         stringTable = header.count * [""]
@@ -246,16 +291,16 @@ class Jnt1:
             stringTable[i] = self.frames[i].name
             e.DumpData(bw)
 
-        if bw.Position != jnt1Offset + header.unknownOffset:
+        if bw.Position() != jnt1Offset + header.unknownOffset:
             raise ValueError('incorrect lengths in writing Jnt1')
 
         for i in range(header.count):
             bw.writeWord(i)
 
-        if bw.Position != jnt1Offset + header.stringTableOffset:
+        if bw.Position() != jnt1Offset + header.stringTableOffset:
             raise ValueError('incorrect lengths in writing Jnt1')
 
-        bw.writeStringTable(stringTable)
+        bw.WriteStringTable(stringTable)
 
         # now complete and rewrite header
         header.sizeOfSection = bw.addPadding((bw.Position()-jnt1Offset))
