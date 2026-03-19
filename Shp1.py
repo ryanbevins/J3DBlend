@@ -530,13 +530,14 @@ class Shp1:
 
             matrixData = Shp1MatrixData()
 
-            # useMtxIndex: use preserved value from import for round-trip,
-            # otherwise write 0 (matches SuperBMD behavior).
-            # The original BMD uses specific DRW1 indices here, but the J3D
-            # runtime doesn't require them for weighted batches with per-vertex
-            # matrix indices. SuperBMD always writes 0 and models render correctly.
+            # useMtxIndex: For rigid batches (J3DShapeMtx), this IS the DRW1
+            # index used by load() — it MUST be correct or the wrong bone matrix
+            # gets applied. For weighted batches (J3DShapeMtxMulti), load() uses
+            # the packet matrix table instead, so this value is less critical.
             if hasattr(packet, '_useMtxIndex'):
                 matrixData.unknown1 = packet._useMtxIndex
+            elif packet.matrixTable:
+                matrixData.unknown1 = packet.matrixTable[0]
             else:
                 matrixData.unknown1 = 0
             matrixData.count = len(packet.matrixTable)
