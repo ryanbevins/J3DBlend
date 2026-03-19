@@ -82,6 +82,8 @@ class Tex1Header:
         self.textureHeaderOffset = None
         self.stringTableOffset = None
 
+    size = 16  # bytes
+
     def LoadData(self, br):
         self.tag = br.ReadFixedLengthString(4)
         self.sizeOfSection = br.ReadDWORD()
@@ -89,6 +91,14 @@ class Tex1Header:
         self.unknown = br.ReadWORD()
         self.textureHeaderOffset = br.ReadDWORD()
         self.stringTableOffset = br.ReadDWORD()
+
+    def DumpData(self, bw):
+        bw.writeString("TEX1")
+        bw.writeDword(self.sizeOfSection)
+        bw.writeWord(self.numImages)
+        bw.writeWord(self.unknown if self.unknown is not None else 0xffff)
+        bw.writeDword(self.textureHeaderOffset)
+        bw.writeDword(self.stringTableOffset)
 # ------------------------------------------------------------------------------------------------
 
 
@@ -135,8 +145,11 @@ class TextureHeader:
     # --some of the unknown data could be render state?
     # --(lod bias, min/mag filter, clamp s/t, ...)
     # <function>"""
+    size = 32  # bytes per texture header entry
+
     def __init__(self):  # GENERATED!
         pass
+
     def LoadData(self, br):
         self.format = br.GetByte()
         self.unknown = br.GetByte()
@@ -155,6 +168,25 @@ class TextureHeader:
         self.unknown8 = br.GetByte()
         self.unknown9 = br.ReadWORD()
         self.dataOffset = br.ReadDWORD()
+
+    def DumpData(self, bw):
+        bw.writeByte(self.format)
+        bw.writeByte(self.unknown)
+        bw.writeWord(self.width)
+        bw.writeWord(self.height)
+        bw.writeByte(self.wrapS)
+        bw.writeByte(self.wrapT)
+        bw.writeByte(self.unknown3)
+        bw.writeByte(self.paletteFormat)
+        bw.writeWord(self.paletteNumEntries)
+        bw.writeDword(self.paletteOffset)
+        bw.writeDword(self.unknown5)
+        bw.writeWord(self.unknown6)
+        bw.writeWord(self.unknown7)
+        bw.writeByte(self.mipmapCount)
+        bw.writeByte(self.unknown8)
+        bw.writeWord(self.unknown9)
+        bw.writeDword(self.dataOffset)
 # ------------------------------------------------------------------------------------------------
 class Tex1:
     # --imageHeaders = #(), -- std::vector<ImageHeader> 
@@ -169,19 +201,27 @@ class Tex1:
     # <function>
     def __init__(self):  # GENERATED!
         self.texHeaders = []
+        self._rawSectionData = None  # raw bytes for round-trip export
 
     def LoadData(self, br):
         tex1Offset = br.Position()
         # -- read textureblock header
         h = Tex1Header()
         h.LoadData(br)
+
+        # Store the entire raw TEX1 section for byte-identical export
+        savedPos = br.Position()
+        br.SeekSet(tex1Offset)
+        self._rawSectionData = br._f.read(h.sizeOfSection)
+        br.SeekSet(savedPos)
+
         # -- read self.stringtable
         self.stringtable = br.ReadStringTable(tex1Offset + h.stringTableOffset)  # readStringtable(tex1Offset + h.stringTableOffset, f, self.stringtable);
         for i in range(len(self.stringtable)):
             if re.search(r'[\\/]', self.stringtable[i]):
                 log.critical('weird characters found in image stringtable. THIS MIGHT HAVE BEEN AN ATTACK')
                 raise KeyboardInterrupt('\n\n>>>>>>POSSIBLE ATTACK. TERMINATING. <<<<<<')
-        
+
         if len(self.stringtable) != h.numImages:
             if common.GLOBALS.PARANOID:
                 raise ValueError("tex1: number of strings doesn't match number of images")
@@ -200,6 +240,94 @@ class Tex1:
             texHeader.LoadData(br)
             self.texHeaders.append(texHeader)
 
+    def DumpData(self, bw):
+        """Write TEX1 section to binary writer.
 
+        If raw section data was captured during import, write it back
+        byte-identical. Otherwise, reconstruct from parsed headers
+        and string table (without image pixel data).
+        """
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
 
+        # Reconstruct TEX1 from parsed data (headers + string table only,
+        # no image pixel data — this path is for newly constructed Tex1 objects)
+        tex1Offset = bw.Position()
 
+        numImages = len(self.texHeaders)
+
+        # Header is 16 bytes, texture headers start right after
+        textureHeaderOffset = Tex1Header.size
+        texHeadersSize = numImages * TextureHeader.size
+        stringTableOffset = textureHeaderOffset + texHeadersSize
+
+        # Write placeholder header
+        header = Tex1Header()
+        header.numImages = numImages
+        header.unknown = 0xffff
+        header.textureHeaderOffset = textureHeaderOffset
+        header.stringTableOffset = stringTableOffset
+        header.sizeOfSection = 0  # placeholder
+        header.DumpData(bw)
+
+        # Write texture headers
+        for th in self.texHeaders:
+            th.DumpData(bw)
+
+        # Write string table
+        bw.WriteStringTable(self.stringtable)
+
+        # Pad to 32-byte alignment
+        rawSize = bw.Position() - tex1Offset
+        sectionSize = ((rawSize + 31) // 32) * 32
+        padNeeded = sectionSize - rawSize
+        if padNeeded > 0:
+            bw.writePadding(padNeeded)
+
+        # Go back and write section size
+        bw.SeekSet(tex1Offset + 4)
+        bw.writeDword(sectionSize)
+        bw.SeekSet(tex1Offset + sectionSize)
+
+    def FromMaterials(self, materials):
+        """Reconstruct TEX1 from Blender materials' gc_tex custom properties.
+
+        This collects unique textures referenced by materials and rebuilds
+        the texHeaders and stringtable arrays.
+        """
+        self.texHeaders = []
+        self.stringtable = []
+        seen = {}  # name -> index
+
+        for mat in materials:
+            if mat is None:
+                continue
+            for texIdx in range(8):
+                prefix = "gc_tex%d_" % texIdx
+                name = mat.get(prefix + "name")
+                if name is None or name in seen:
+                    continue
+
+                th = TextureHeader()
+                th.format = mat.get(prefix + "format", 0)
+                th.unknown = mat.get(prefix + "unknown", 0)
+                th.width = mat.get(prefix + "width", 0)
+                th.height = mat.get(prefix + "height", 0)
+                th.wrapS = mat.get(prefix + "wrapS", 0)
+                th.wrapT = mat.get(prefix + "wrapT", 0)
+                th.unknown3 = mat.get(prefix + "unknown3", 0)
+                th.paletteFormat = mat.get(prefix + "paletteFormat", 0)
+                th.paletteNumEntries = mat.get(prefix + "paletteNumEntries", 0)
+                th.paletteOffset = mat.get(prefix + "paletteOffset", 0)
+                th.unknown5 = mat.get(prefix + "unknown5", 0)
+                th.unknown6 = mat.get(prefix + "unknown6", 0)
+                th.unknown7 = mat.get(prefix + "unknown7", 0)
+                th.mipmapCount = mat.get(prefix + "mipmapCount", 0)
+                th.unknown8 = mat.get(prefix + "unknown8", 0)
+                th.unknown9 = mat.get(prefix + "unknown9", 0)
+                th.dataOffset = 0  # will need to be fixed up with actual image data
+
+                seen[name] = len(self.texHeaders)
+                self.texHeaders.append(th)
+                self.stringtable.append(name)
