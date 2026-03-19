@@ -500,10 +500,11 @@ class BModel:
                             self.vtx.normals[currPrimitive.points[m].normalIndex].copy()
                         temp_normals[currPrimitive.points[m].normalIndex].rotate(mat)
 
+                    newPos = mat@(self.vtx.positions[posIndex])
+
                     while len(self.vertexMultiMatrixEntry) <= posIndex:
                         self.vertexMultiMatrixEntry.append(None)
                     self.vertexMultiMatrixEntry[posIndex] = multiMat
-                    newPos = mat@(self.vtx.positions[posIndex])
                     while len(self.model.vertices) <= posIndex:
                         self.model.vertices.append(None)
                     self.model.vertices[posIndex] = newPos.copy()

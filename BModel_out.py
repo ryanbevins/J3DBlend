@@ -124,35 +124,76 @@ def mesh_was_modified(bmodel):
     return False
 
 
+def _extract_batch_material_order(inf):
+    """Walk the INF1 scene graph and extract the batch-to-blender-material mapping.
+
+    During import, Blender material slot indices are assigned by incrementing
+    a counter each time a material node (0x11) is encountered in DFS order.
+    Shape nodes (0x12) reference SHP1 batch indices. The most recently seen
+    material determines the Blender material_index for faces in that batch.
+
+    Returns a list of (batch_index, blender_material_index) in scene graph order.
+    This tells us which Blender material_index each SHP1 batch should contain.
+    """
+    result = []  # [(batch_index, blender_mat_index)]
+    mat_counter = [0]  # mutable counter for material node encounters
+
+    def _walk(sg, current_mat_idx):
+        if sg.type == 0x11:  # Material node
+            current_mat_idx = mat_counter[0]
+            mat_counter[0] += 1
+        elif sg.type == 0x12:  # Shape (batch) node
+            result.append((sg.index, current_mat_idx))
+
+        for child in sg.children:
+            _walk(child, current_mat_idx)
+
+    _walk(inf.rootSceneGraph, 0)
+    return result
+
+
 def reconstruct_mesh_sections(bmodel):
     """Rebuild VTX1 and SHP1 from the current Blender mesh.
 
-    Always does full reconstruction from scratch — no preserved data.
-    This must work for any mesh, imported or brand new.
+    INF1 is NOT rebuilt — it stays as the raw data from import.
+    The original INF1 scene graph references batches by index (0..N-1),
+    so SHP1 must produce exactly the same number of batches in the same
+    material order as the original.
     """
     mesh_obj = find_mesh_object(bmodel)
-
     if mesh_obj is None:
         log.warning("Cannot find Blender mesh object for reconstruction.")
         return
 
     log.info("Reconstructing VTX1 and SHP1 from Blender mesh: %s", mesh_obj.name)
 
-    # Reconstruct VTX1
-    # Pass JNT1, DRW1, EVP1 so positions/normals can be un-transformed to original space
-    # Rigid vertices -> bone-local space, Weighted vertices -> bind/model space
     jnt = getattr(bmodel, 'jnt', None)
     drw = getattr(bmodel, 'drw', None)
     evp = getattr(bmodel, 'evp', None)
+
+    # Extract original batch ordering from INF1 scene graph
+    # This gives us [(batch_index, blender_material_index), ...] in scene graph order
+    batch_mat_order = _extract_batch_material_order(bmodel.inf)
+    # Sort by batch_index to get: batch 0 -> mat X, batch 1 -> mat Y, ...
+    batch_mat_order.sort(key=lambda x: x[0])
+    batch_order = [blender_mat for _, blender_mat in batch_mat_order]
+    log.info("INF1 batch->material order: %s", batch_order)
+
+    # Reconstruct VTX1
     new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(mesh_obj, jnt=jnt, drw=drw, evp=evp)
-    # Preserve original arrayFormats if available (for encoding format)
     if hasattr(bmodel.vtx, 'arrayFormats') and bmodel.vtx.arrayFormats:
         new_vtx.arrayFormats = bmodel.vtx.arrayFormats
+    if hasattr(bmodel.vtx, '_formatSentinel'):
+        new_vtx._formatSentinel = bmodel.vtx._formatSentinel
     bmodel.vtx = new_vtx
 
-    # Reconstruct SHP1
-    new_shp = Shp1.Shp1.FromBlenderMesh(mesh_obj, new_vtx, loop_indices, bmodel.drw)
+    # Reconstruct SHP1 (majority-vote: rigid or weighted per material batch)
+    # Pass batch_order so batches are produced in the same order as the original INF1
+    new_shp = Shp1.Shp1.FromBlenderMesh(
+        mesh_obj, new_vtx, loop_indices, bmodel.drw, batch_order=batch_order)
     bmodel.shp = new_shp
+
+    # INF1 is NOT touched — it stays as the raw data from import.
 
 
 def export_bmd(filepath, bmodel, force_reconstruct=False):

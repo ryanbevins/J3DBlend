@@ -535,10 +535,8 @@ class Vtx1:
         HEADER_SIZE = 64
         arrayFormatOffset = HEADER_SIZE  # formats start right after header
         arrayFormatSize = numArrays * 16  # each ArrayFormat is 16 bytes
-        # Add sentinel format entry size if present
-        hasSentinel = hasattr(self, '_formatSentinel') and self._formatSentinel is not None
-        if hasSentinel:
-            arrayFormatSize += 16
+        # Always include sentinel format entry (terminator)
+        arrayFormatSize += 16
 
         # Calculate data offsets — first data block starts after formats, aligned to 32
         dataStart = arrayFormatOffset + arrayFormatSize
@@ -600,9 +598,17 @@ class Vtx1:
         for i in activeSlots:
             self.arrayFormats[i].DumpData(bw)
 
-        # Write sentinel format entry if present (arrayType=0xFF terminator)
+        # Write sentinel format entry (arrayType=0xFF terminator)
+        # This MUST be written or the game reads past valid entries into garbage.
         if hasattr(self, '_formatSentinel') and self._formatSentinel is not None:
             self._formatSentinel.DumpData(bw)
+        else:
+            # Create default sentinel
+            bw.writeDword(0x000000FF)  # arrayType=0xFF
+            bw.writeDword(0x00000001)  # componentCount=1
+            bw.writeDword(0x00000000)  # dataType=0
+            bw.writeByte(0)            # decimalPoint=0
+            bw.writePadding(3)         # pad
 
         # Pad to first data offset
         if activeSlots:
@@ -669,102 +675,72 @@ class Vtx1:
         vtx.arrayFormats = None  # will be auto-built by DumpData
 
         # --- Build per-vertex inverse matrix for un-transforming vertices ---
-        # During import, each vertex was transformed: world_pos = mat @ original_pos
-        # For rigid: mat = jnt.frames[bone_idx].matrix
-        # For weighted: mat = sum(weight * LocalMatrix(jnt, bone) @ evp.matrices[bone])
-        # We reverse: original_pos = mat^-1 @ world_pos
+        #
+        # BMD stores vertex positions in two coordinate spaces:
+        #   - Rigid batches (single bone): bone-local space.
+        #     At runtime: world_pos = bone_world_matrix @ local_pos
+        #   - Weighted batches (multi-bone skinning): bind-pose world space.
+        #     At runtime: world_pos = blended_skinning_matrix @ bind_pos
+        #     (At bind pose, the skinning matrix ≈ identity, so bind_pos ≈ world_pos)
+        #
+        # For each vertex:
+        #   - If exactly 1 significant bone group → RIGID: apply inv(bone_world_matrix)
+        #   - If multiple significant groups → WEIGHTED: no transform (bind-pose world space)
+        #
         vert_bone_inv_matrix = {}  # blender vert index -> inverse matrix (4x4)
         has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
                         and mesh_obj.parent.type == 'ARMATURE')
 
-        if has_armature and jnt is not None and drw is not None and mesh_obj.vertex_groups:
+        if has_armature and jnt is not None and drw is not None:
             arm_obj = mesh_obj.parent
             bone_names = [b.name for b in arm_obj.data.bones]
 
-            # Build vgroup_index -> bone_index mapping
-            vgroup_to_bone = {}
+            vgroup_to_bone_name = {}
             for vg in mesh_obj.vertex_groups:
                 if vg.name in bone_names:
-                    vgroup_to_bone[vg.index] = bone_names.index(vg.name)
+                    vgroup_to_bone_name[vg.index] = vg.name
 
-            # Determine which bones have rigid DRW1 entries
-            bone_has_rigid_drw = {}  # bone_idx -> True if has rigid DRW1 entry
-            for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
-                if not isW:
-                    bone_has_rigid_drw[data_val] = True
+            # Use JNT1 frames for bone matrices if available, otherwise Blender armature rest pose
+            bone_world_matrix = {}
+            for bi, frame in enumerate(jnt.frames):
+                if bi < len(bone_names) and frame.matrix is not None:
+                    bone_world_matrix[bone_names[bi]] = frame.matrix
 
-            # Build DRW1 weighted entry -> blended skinning matrix cache
-            # For weighted entries, we replicate the same logic as updateMatrixTable
-            weighted_drw_matrix = {}  # drw_index -> blended matrix
-            if evp is not None:
-                for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
-                    if isW and data_val < len(evp.weightedIndices):
-                        mm = evp.weightedIndices[data_val]
-                        m = MathMatrix()
-                        m.zero()
-                        for r in range(len(mm.weights)):
-                            bone_idx = mm.indices[r]
-                            if bone_idx < len(evp.matrices) and bone_idx < len(jnt.frames):
-                                sm1 = evp.matrices[bone_idx]  # inverse bind matrix
-                                sm2 = Mat44.LocalMatrix(jnt, bone_idx, True)  # bone world matrix
-                                sm3 = sm2 @ sm1
-                                Mat44.Mad(m, sm3, mm.weights[r])
-                        m[3][3] = 1.0
-                        weighted_drw_matrix[di] = m
+            if not bone_world_matrix:
+                # Fallback: compute from Blender armature rest pose
+                for bone in arm_obj.data.bones:
+                    if bone.name in bone_names:
+                        bone_world_matrix[bone.name] = bone.matrix_local
 
-            # For each vertex, compute the inverse of the transform used during import
             for vi, vert in enumerate(mesh.vertices):
                 if not vert.groups:
                     continue
-                best_group = max(vert.groups, key=lambda g: g.weight)
-                bone_idx = vgroup_to_bone.get(best_group.group, None)
-                if bone_idx is None:
-                    continue
-
-                if bone_idx in bone_has_rigid_drw:
-                    # Rigid vertex: import used jnt.frames[bone_idx].matrix
-                    if bone_idx < len(jnt.frames) and jnt.frames[bone_idx].matrix is not None:
-                        mat = jnt.frames[bone_idx].matrix
-                        try:
-                            vert_bone_inv_matrix[vi] = mat.inverted()
-                        except ValueError:
-                            pass
-                else:
-                    # Weighted vertex: find which DRW1 weighted entry was used
-                    # The import assigns weighted vertices based on their EVP1 envelope.
-                    # We need to find the DRW1 weighted entry whose EVP1 envelope includes this bone.
-                    # Then use the cached blended skinning matrix.
-                    best_drw = None
-                    for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
-                        if isW and data_val < len(evp.weightedIndices):
-                            mm = evp.weightedIndices[data_val]
-                            if bone_idx in mm.indices:
-                                best_drw = di
-                                break
-                    if best_drw is not None and best_drw in weighted_drw_matrix:
-                        mat = weighted_drw_matrix[best_drw]
+                sig_groups = []
+                for g in vert.groups:
+                    bname = vgroup_to_bone_name.get(g.group)
+                    if bname is not None and g.weight > 0.001:
+                        sig_groups.append((bname, g.weight))
+                if len(sig_groups) == 1:
+                    bname = sig_groups[0][0]
+                    mat = bone_world_matrix.get(bname)
+                    if mat is not None:
                         try:
                             vert_bone_inv_matrix[vi] = mat.inverted()
                         except ValueError:
                             pass
 
-        # --- Positions (deduplicated from mesh vertices) ---
-        # GC coordinate conversion: blender(x,y,z) -> gc(x, z, -y)
-        pos_map = {}  # (x,y,z) gc-space -> pool index
+        # --- Positions (full deduplication) ---
+        pos_map = {}
         vtx.positions = []
-        vert_to_posIndex = {}  # blender vert index -> vtx1 pool index
-
+        vert_to_posIndex = {}
         for vi, vert in enumerate(mesh.vertices):
             bx, by, bz = vert.co.x, vert.co.y, vert.co.z
             gc_pos_world = Vector((bx, bz, -by))
-
-            # Un-transform from world space to bone-local space
             if vi in vert_bone_inv_matrix:
                 gc_pos = vert_bone_inv_matrix[vi] @ gc_pos_world
             else:
                 gc_pos = gc_pos_world
-
-            key = (gc_pos.x, gc_pos.y, gc_pos.z)
+            key = (round(gc_pos.x, 4), round(gc_pos.y, 4), round(gc_pos.z, 4))
             if key not in pos_map:
                 pos_map[key] = len(vtx.positions)
                 vtx.positions.append(Vector(gc_pos))

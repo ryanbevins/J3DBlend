@@ -149,6 +149,129 @@ class Inf1:
         self.rootSceneGraph = self.buildSceneGraph(self.rootSceneGraph)
 
 
+    @staticmethod
+    def Rebuild(batch_material_indices, num_vertices, packet_count, old_inf=None,
+                batch_info=None, drw1=None, armature_obj=None):
+        """Build a new INF1 from a batch list with per-batch material indices.
+
+        Builds the full bone hierarchy from the Blender armature. Rigid batches
+        are placed under their respective bone's joint node. Weighted batches
+        are placed at the root level (under joint 0).
+
+        Args:
+            batch_material_indices: list of material index per batch (len = batch count)
+            num_vertices: vertex count for the INF1 header
+            packet_count: total packet count for the INF1 header
+            old_inf: optional existing Inf1 to preserve unknown1
+            batch_info: list of (is_rigid, drw_idx_or_None) per batch
+            drw1: Drw1 instance (to map DRW index -> bone index for rigid batches)
+            armature_obj: Blender armature object (for bone hierarchy)
+
+        Returns a new Inf1 instance with _rawSectionData = None (forces DumpData path).
+        """
+        inf = Inf1()
+        inf._rawSectionData = None  # force reconstruction
+        inf.numVertices = num_vertices
+        inf._unknown1 = getattr(old_inf, '_unknown1', 0) if old_inf else 0
+        inf._packetCount = packet_count
+
+        # Build bone hierarchy from armature
+        bone_names = []
+        bone_children = {}  # bone_index -> [child_bone_indices]
+        root_bones = []
+        if armature_obj is not None and armature_obj.type == 'ARMATURE':
+            bones = armature_obj.data.bones
+            bone_names = [b.name for b in bones]
+            for i, bone in enumerate(bones):
+                bone_children[i] = []
+            for i, bone in enumerate(bones):
+                if bone.parent is None:
+                    root_bones.append(i)
+                else:
+                    parent_idx = bone_names.index(bone.parent.name)
+                    bone_children[parent_idx].append(i)
+
+        # Map bone_index -> list of (batch_idx, mat_idx) for rigid batches at that bone
+        bone_batches = {}
+        weighted_batches = []  # (batch_idx, mat_idx)
+
+        if batch_info is not None and drw1 is not None:
+            for batch_idx, (is_rigid, drw_idx) in enumerate(batch_info):
+                mat_idx = batch_material_indices[batch_idx]
+                if is_rigid and drw_idx is not None:
+                    # Look up the bone index from DRW1
+                    if drw_idx < len(drw1.data):
+                        bone_idx = drw1.data[drw_idx]
+                    else:
+                        bone_idx = 0
+                    if bone_idx not in bone_batches:
+                        bone_batches[bone_idx] = []
+                    bone_batches[bone_idx].append((batch_idx, mat_idx))
+                else:
+                    weighted_batches.append((batch_idx, mat_idx))
+        else:
+            # No batch info: fall back to flat structure
+            for batch_idx, mat_idx in enumerate(batch_material_indices):
+                weighted_batches.append((batch_idx, mat_idx))
+
+        def _make_batch_nodes(batch_idx, mat_idx):
+            """Create material -> shape node chain."""
+            mat_node = SceneGraph()
+            mat_node.type = 0x11  # Material
+            mat_node.index = mat_idx
+            shape_node = SceneGraph()
+            shape_node.type = 0x12  # Shape
+            shape_node.index = batch_idx
+            mat_node.children.append(shape_node)
+            return mat_node
+
+        def _build_joint_tree(bone_idx):
+            """Recursively build joint hierarchy with attached batches."""
+            joint = SceneGraph()
+            joint.type = 0x10  # Joint
+            joint.index = bone_idx
+
+            # Attach rigid batches for this bone
+            if bone_idx in bone_batches:
+                for batch_idx, mat_idx in bone_batches[bone_idx]:
+                    joint.children.append(_make_batch_nodes(batch_idx, mat_idx))
+
+            # Recurse into children
+            for child_idx in bone_children.get(bone_idx, []):
+                joint.children.append(_build_joint_tree(child_idx))
+
+            return joint
+
+        if root_bones:
+            # Build from armature hierarchy
+            if len(root_bones) == 1:
+                root = _build_joint_tree(root_bones[0])
+            else:
+                # Multiple root bones: wrap in a virtual root
+                root = SceneGraph()
+                root.type = 0x10
+                root.index = 0
+                for rb in root_bones:
+                    root.children.append(_build_joint_tree(rb))
+
+            # Attach weighted batches at the deepest point of the last bone
+            # in the hierarchy (matching the original BMD pattern where weighted
+            # batches nest inside the deepest leaf). Actually, the original puts
+            # weighted batches at the top level under root. Let's do that.
+            # Insert weighted batches as first children of root (before bone hierarchy)
+            for batch_idx, mat_idx in weighted_batches:
+                root.children.insert(0, _make_batch_nodes(batch_idx, mat_idx))
+        else:
+            # No armature: flat structure
+            root = SceneGraph()
+            root.type = 0x10
+            root.index = 0
+            for batch_idx, mat_idx in enumerate(batch_material_indices):
+                root.children.append(_make_batch_nodes(batch_idx, mat_idx))
+
+        inf.rootSceneGraph = root
+        return inf
+
     def DumpData(self, bw):
         """Write INF1 section. If raw data was captured during import, write it back."""
         if self._rawSectionData is not None:
