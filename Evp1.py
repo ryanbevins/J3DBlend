@@ -26,17 +26,17 @@ class Evp1Header:
 
     def DumpData(self, bw):
 
-        bw.WriteString('EVP1')
-        bw.WriteDword(self.sizeOfSection)
-        bw.WriteWord(self.count)
-        bw.WriteWord(self.pad)
+        bw.writeString('EVP1')
+        bw.writeDword(self.sizeOfSection)
+        bw.writeWord(self.count)
+        bw.writeWord(self.pad)
         # 0 - count many bytes, each byte describes how many bones belong to this index
         # 1 - sum over all bytes in 0 many shorts (index into some joint stuff? into matrix table?)
         # 2 - bone weights table (as many floats as shorts in 1)
         # 3 - matrix table (matrix is 3x4 float array)
 
         for i in range(4):
-            bw.WriteDword(self.offsets[i])
+            bw.writeDword(self.offsets[i])
 
 
 class MultiMatrix:
@@ -49,6 +49,7 @@ class Evp1:
     def __init__(self):  # GENERATED!
         self.matrices = []
         self.weightedIndices = []
+        self._rawSectionData = None
 
     def LoadData(self, br):
 
@@ -56,6 +57,12 @@ class Evp1:
 
         header = Evp1Header()
         header.LoadData(br)
+
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(evp1Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
 
         # -- read counts array
         br.SeekSet(evp1Offset + header.offsets[0])
@@ -102,6 +109,11 @@ class Evp1:
                     self.matrices[i][j][k] = br.GetFloat()
 
     def DumpData(self, bw):
+        """Write EVP1 section. If raw data was captured during import, write it back."""
+        if hasattr(self, '_rawSectionData') and self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
+
         evp1Offset = bw.Position()
 
         header = Evp1Header()
@@ -121,34 +133,25 @@ class Evp1:
 
         header.DumpData(bw)
 
-        bw.WritePadding(header.offsets[0] - Evp1Header.size)
-        # read counts array
-        # bw.SeekSet(evp1Offset + header.offsets[0])
+        bw.writePadding(header.offsets[0] - Evp1Header.size)
 
         for i in range(header.count):
-            bw.WriteByte(counts[i])
+            bw.writeByte(counts[i])
 
-
-        # -- read indices of weighted self.matrices
-        # bw.SeekSet(evp1Offset + header.offsets[1])
-
+        # write indices of weighted matrices
         for i in range(header.count):
             for j in range(counts[i]):
-                bw.WriteWord(self.weightedIndices[i].indices[j])
+                bw.writeWord(self.weightedIndices[i].indices[j])
 
-        # read weights of weighted matrices
-        # bw.SeekSet(evp1Offset + header.offsets[2])
-
+        # write weights of weighted matrices
         for i in range(header.count):
             for j in range(counts[i]):
-                bw.WriteFloat(self.weightedIndices[i].weights[j])
+                bw.writeFloat(self.weightedIndices[i].weights[j])
 
-
-        # write matrices
-        # bw.SeekSet(evp1Offset + header.offsets[3])
+        # write inverse bind matrices (3x4)
         for i in range(numMatrices):
             for j in range(3):
                 for k in range(4):
-                    bw.WriteFloat(self.matrices[i][j][k])
+                    bw.writeFloat(self.matrices[i][j][k])
 
-        bw.WritePadding(evp1Offset + header.sizeofsection - bw.Position())
+        bw.writePadding(evp1Offset + header.sizeOfSection - bw.Position())
