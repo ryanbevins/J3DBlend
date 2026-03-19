@@ -23,25 +23,32 @@ class Drw1Header:
         self.offsetToData = br.ReadDWORD()
 
     def DumpData(self, bw):
-        bw.WriteString('DRW1')
-        bw.WriteDword(self.sizeOfSection)
-        bw.WriteWord(self.count)
-        bw.WriteWord(self.pad)
-        bw.WriteDword(self.offsetToIsWeighted)
-        bw.WriteDword(self.offsetToData)
+        bw.writeString('DRW1')
+        bw.writeDword(self.sizeOfSection)
+        bw.writeWord(self.count)
+        bw.writeWord(self.pad)
+        bw.writeDword(self.offsetToIsWeighted)
+        bw.writeDword(self.offsetToData)
   
 
 class Drw1:
     def __init__(self):  # GENERATED!
         self.data= []
         self.isWeighted= []
+        self._rawSectionData = None
 
     def LoadData(self, br):
-                
+
         drw1Offset = br.Position()
 
         header = Drw1Header()
         header.LoadData(br)
+
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(drw1Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
 
         # -- read bool array
         self.isWeighted = [False] * header.count
@@ -67,6 +74,10 @@ class Drw1:
             self.data[i] = br.ReadWORD()
 
     def DumpData(self, bw):
+        """Write DRW1 section. If raw data was captured during import, write it back."""
+        if hasattr(self, '_rawSectionData') and self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
 
         drw1Offset = bw.Position()
 
@@ -83,10 +94,10 @@ class Drw1:
 
         bw.writePadding(header.offsetToIsWeighted - Drw1Header.size)
 
-        for bool in self.isWeighted:
-            bw.WriteByte(int(bool))
+        for isW in self.isWeighted:
+            bw.writeByte(int(isW))
 
         for index in self.data:
-            bw.WriteWord(index)
+            bw.writeWord(index)
 
         bw.writePadding(drw1Offset + header.sizeOfSection - bw.Position())
