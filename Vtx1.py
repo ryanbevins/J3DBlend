@@ -391,6 +391,15 @@ class Vtx1:
             af = ArrayFormat()
             af.LoadData(br)
             formats.append(af)
+        # Check for sentinel/terminator format entry (arrayType=0xFF)
+        sentinel_pos = br.Position()
+        sentinel_check = ArrayFormat()
+        sentinel_check.LoadData(br)
+        if sentinel_check.arrayType == 0xFF:
+            self._formatSentinel = sentinel_check
+        else:
+            self._formatSentinel = None
+            br.SeekSet(sentinel_pos)  # rewind if not a sentinel
         # Store array formats for BMD export round-tripping
         self.arrayFormats = [None] * 13
 
@@ -526,6 +535,10 @@ class Vtx1:
         HEADER_SIZE = 64
         arrayFormatOffset = HEADER_SIZE  # formats start right after header
         arrayFormatSize = numArrays * 16  # each ArrayFormat is 16 bytes
+        # Add sentinel format entry size if present
+        hasSentinel = hasattr(self, '_formatSentinel') and self._formatSentinel is not None
+        if hasSentinel:
+            arrayFormatSize += 16
 
         # Calculate data offsets — first data block starts after formats, aligned to 32
         dataStart = arrayFormatOffset + arrayFormatSize
@@ -586,6 +599,10 @@ class Vtx1:
         # Write array format descriptors
         for i in activeSlots:
             self.arrayFormats[i].DumpData(bw)
+
+        # Write sentinel format entry if present (arrayType=0xFF terminator)
+        if hasattr(self, '_formatSentinel') and self._formatSentinel is not None:
+            self._formatSentinel.DumpData(bw)
 
         # Pad to first data offset
         if activeSlots:

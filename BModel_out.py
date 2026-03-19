@@ -125,14 +125,15 @@ def mesh_was_modified(bmodel):
 
 
 def reconstruct_mesh_sections(bmodel):
-    """Rebuild VTX1 and SHP1 from the current Blender mesh data.
+    """Rebuild VTX1 and SHP1 from the current Blender mesh.
 
-    Replaces bmodel.vtx and bmodel.shp with reconstructed versions.
-    Clears their raw section data so DumpData uses reconstruction.
+    Always does full reconstruction from scratch — no preserved data.
+    This must work for any mesh, imported or brand new.
     """
     mesh_obj = find_mesh_object(bmodel)
+
     if mesh_obj is None:
-        log.warning("Cannot find Blender mesh object for reconstruction. Using raw round-trip.")
+        log.warning("Cannot find Blender mesh object for reconstruction.")
         return
 
     log.info("Reconstructing VTX1 and SHP1 from Blender mesh: %s", mesh_obj.name)

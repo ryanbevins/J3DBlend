@@ -188,5 +188,10 @@ class BinaryWriter:
         if remainder != 0:
             self.writePadding(16 - remainder)
 
+    def writePaddingTo32(self):
+        remainder = self._f.tell() % 32
+        if remainder != 0:
+            self.writePadding(32 - remainder)
+
     def addPadding(self, size):
         return 16 * (size//16 + 1)

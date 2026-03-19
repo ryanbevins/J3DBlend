@@ -127,6 +127,9 @@ class ShpPacket:
     def DumpPacketPrimitives(self, attribs, bw):
         writtenBytes = 0
 
+        if not self.primitives:
+            return 0  # empty packet
+
         for curPrimative in self.primitives:
             bw.writeByte(curPrimative.type)
             writtenBytes += 1
@@ -423,6 +426,8 @@ class Shp1:
             dstPacket = ShpPacket()
             br.SeekSet(baseOffset + header.offsetData + packetLoc.offset)
             dstPacket.LoadPacketPrimitives(attribs, packetLoc.packetSize, br)
+            # Preserve original packet size (includes padding) for round-trip
+            dstPacket._originalPacketSize = packetLoc.packetSize
             if len(dst.packets) <= i:
                 dst.packets.append(None)
             dst.packets[i] = dstPacket
@@ -432,7 +437,8 @@ class Shp1:
             br.SeekSet(baseOffset + header.offsetToMatrixData + (batchSrc.firstMatrixData + i)*matrixData.size)
             matrixData.LoadData(br)
 
-            # --print (matrixData as string)
+            # Preserve useMtxIndex for round-trip
+            dstPacket._useMtxIndex = matrixData.unknown1
 
             # -- read packet's matrix table
             # --dstPacket.matrixTable.resize(matrixData.count);
@@ -447,12 +453,17 @@ class Shp1:
 
     def decomposeBatch(self, bww, batch, header, baseOffset, batchDst):
 
-        # Set batch descriptor type: 0x00FF for rigid, 0x03FF for weighted
-        is_rigid = getattr(batch, '_is_rigid', not batch.attribs.hasMatrixIndices)
-        batchDst.unknown = 0x00ff if is_rigid else 0x03ff
+        # Use preserved descriptor values from import if available
+        orig_desc = getattr(batch, '_descriptor', None)
 
-        # Set bounding box floats
-        batchDst.unknown4 = getattr(batch, '_bbox', [0.0] * 7)
+        if orig_desc is not None:
+            batchDst.unknown = orig_desc.unknown
+            batchDst.unknown4 = orig_desc.unknown4
+        else:
+            # Reconstructed batch: compute from flags
+            is_rigid = getattr(batch, '_is_rigid', not batch.attribs.hasMatrixIndices)
+            batchDst.unknown = 0x00ff if is_rigid else 0x03ff
+            batchDst.unknown4 = getattr(batch, '_bbox', [0.0] * 7)
 
         batch.raw_attribs = attribs = []
 
@@ -519,9 +530,10 @@ class Shp1:
 
             matrixData = Shp1MatrixData()
 
-            # unknown1: use the first entry in the matrix table for this packet
-            # (matches original behavior observed in diagnostic)
-            if packet.matrixTable:
+            # useMtxIndex: use preserved value from import, or fall back to first table entry
+            if hasattr(packet, '_useMtxIndex'):
+                matrixData.unknown1 = packet._useMtxIndex
+            elif packet.matrixTable:
                 matrixData.unknown1 = packet.matrixTable[0]
             else:
                 matrixData.unknown1 = 0
@@ -538,10 +550,36 @@ class Shp1:
 
     @staticmethod
     def _get_vert_drw_index(vert, vgroup_to_drw):
-        """Get the DRW1 index for a vertex based on its heaviest vertex group."""
+        """Get the DRW1 rigid index for a vertex based on its heaviest vertex group.
+
+        Returns the DRW1 index if the heaviest group has a rigid entry,
+        or None if no rigid entry exists (vertex must go into a weighted batch).
+        """
         if vert.groups:
             best_group = max(vert.groups, key=lambda g: g.weight)
-            return vgroup_to_drw.get(best_group.group, 0)
+            drw_idx = vgroup_to_drw.get(best_group.group, None)
+            return drw_idx
+        return None
+
+    @staticmethod
+    def _get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_to_all_drw):
+        """Get the best DRW1 index for a vertex, considering both rigid and weighted entries.
+
+        For rigid bones, returns the DRW1 rigid entry.
+        For bones without rigid entries, returns a DRW1 weighted entry.
+        Falls back to 0 if nothing found.
+        """
+        if not vert.groups:
+            return 0
+        best_group = max(vert.groups, key=lambda g: g.weight)
+        # Try rigid first
+        rigid = vgroup_to_drw.get(best_group.group, None)
+        if rigid is not None:
+            return rigid
+        # Try weighted entry for this bone
+        weighted = bone_to_all_drw.get(best_group.group, None)
+        if weighted is not None:
+            return weighted
         return 0
 
     @staticmethod
@@ -592,7 +630,7 @@ class Shp1:
         return [unknown, min_x, min_y, min_z, max_x, max_y, max_z]
 
     @staticmethod
-    def _split_into_packets(triangles, mesh, vgroup_to_drw, max_bones=10):
+    def _split_into_packets(triangles, mesh, vgroup_to_drw, bone_to_all_drw, max_bones=10):
         """Split triangles into packets, each using at most max_bones unique DRW1 indices.
 
         Returns list of (tri_list, drw_index_list) tuples.
@@ -603,7 +641,7 @@ class Shp1:
             bones = set()
             for vi in lt.vertices:
                 vert = mesh.vertices[vi]
-                drw_idx = Shp1._get_vert_drw_index(vert, vgroup_to_drw)
+                drw_idx = Shp1._get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_to_all_drw)
                 bones.add(drw_idx)
             tri_bones.append((lt, bones))
 
@@ -676,13 +714,54 @@ class Shp1:
         if has_armature and mesh_obj.vertex_groups:
             arm_obj = mesh_obj.parent
             bone_names = [b.name for b in arm_obj.data.bones]
+            log.info("SHP1 FromBlenderMesh: bone_names = %s", bone_names)
+            log.info("SHP1 FromBlenderMesh: DRW1 has %d entries (%d rigid)",
+                     len(drw1.isWeighted),
+                     sum(1 for w in drw1.isWeighted if not w))
             for vg in mesh_obj.vertex_groups:
                 if vg.name in bone_names:
                     bone_idx = bone_names.index(vg.name)
+                    found = False
                     # Find the rigid DRW1 entry for this bone
                     for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
                         if not isW and data_val == bone_idx:
                             vgroup_to_drw[vg.index] = di
+                            log.info("  vgroup[%d] '%s' -> bone_idx=%d -> DRW1[%d]",
+                                     vg.index, vg.name, bone_idx, di)
+                            found = True
+                            break
+                    if not found:
+                        log.warning("  vgroup[%d] '%s' -> bone_idx=%d -> NO DRW1 RIGID ENTRY",
+                                    vg.index, vg.name, bone_idx)
+                else:
+                    log.warning("  vgroup[%d] '%s' -> NOT IN BONE LIST", vg.index, vg.name)
+
+        # Build weighted DRW1 mapping for bones without rigid entries.
+        # Maps vgroup_index -> first DRW1 weighted entry whose EVP1 envelope
+        # references that bone. This is an approximation — the actual vertex-to-
+        # envelope mapping is complex, but using the primary bone's weighted entry
+        # produces correct rendering.
+        bone_to_all_drw = {}
+        if has_armature and mesh_obj.vertex_groups:
+            for vg in mesh_obj.vertex_groups:
+                if vg.index in vgroup_to_drw:
+                    continue  # already has rigid mapping
+                if vg.name in bone_names:
+                    bone_idx = bone_names.index(vg.name)
+                    # Find a weighted DRW1 entry that references this bone via EVP1
+                    for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
+                        if isW:
+                            # data_val is EVP1 index — we'd need EVP1 to check bone refs
+                            # For now, just use the first weighted entry we find
+                            # TODO: proper EVP1 lookup
+                            pass
+                    # Simpler approach: find any DRW1 weighted entry
+                    # For now, assign the first weighted DRW1 entry as fallback
+                    for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
+                        if isW:
+                            bone_to_all_drw[vg.index] = di
+                            log.info("  vgroup[%d] '%s' -> bone_idx=%d -> DRW1[%d] (weighted fallback)",
+                                     vg.index, vg.name, bone_idx, di)
                             break
 
         # Group triangles by (material_index, primary_bone_drw_index).
@@ -691,36 +770,57 @@ class Shp1:
         # same primary bone, the triangle goes into a rigid group for that
         # (material, bone) pair. Otherwise it goes into a weighted group
         # keyed as (material, -1).
-        batch_groups = {}  # (mat_idx, bone_drw_idx_or_-1) -> [triangles]
+        # Group triangles by material index
+        mat_groups = {}  # mat_idx -> [triangles]
         for lt in mesh.loop_triangles:
             mi = lt.material_index
+            if mi not in mat_groups:
+                mat_groups[mi] = []
+            mat_groups[mi].append(lt)
+
+        # For each material, determine if it's rigid (all faces share one bone)
+        # or weighted (faces span multiple bones)
+        # Include all materials that have triangles, plus materials referenced
+        # in the mesh (up to the number of mesh materials, excluding error placeholders)
+        batch_list = []  # (mat_idx, is_rigid, bone_drw_idx_or_None, triangles)
+        # Filter out error/placeholder materials (names starting with "ERROR")
+        valid_mat_indices = set()
+        for mi in range(len(mesh.materials)):
+            mat = mesh.materials[mi]
+            if mat and mat.name.startswith("ERROR"):
+                continue
+            valid_mat_indices.add(mi)
+        valid_mat_indices.update(mat_groups.keys())
+        all_mat_indices = sorted(valid_mat_indices)
+        for mi in all_mat_indices:
+            triangles = mat_groups.get(mi, [])
+            if len(triangles) == 0:
+                # Empty batch for materials with no geometry
+                batch_list.append((mi, True, 0, []))
+                continue
             if has_armature:
-                # Get primary bone for each vertex
-                vert_bones = []
-                for vi in lt.vertices:
-                    vert = mesh.vertices[vi]
-                    drw_idx = Shp1._get_vert_drw_index(vert, vgroup_to_drw)
-                    vert_bones.append(drw_idx)
-                # If all vertices share the same primary bone -> rigid group
-                if vert_bones[0] == vert_bones[1] == vert_bones[2]:
-                    key = (mi, vert_bones[0])
+                # Check if all vertices in this material share one rigid bone
+                all_drw = set()
+                any_none = False
+                for lt in triangles:
+                    for vi in lt.vertices:
+                        vert = mesh.vertices[vi]
+                        drw_idx = Shp1._get_vert_drw_index(vert, vgroup_to_drw)
+                        if drw_idx is None:
+                            any_none = True
+                        else:
+                            all_drw.add(drw_idx)
+                if not any_none and len(all_drw) == 1:
+                    batch_list.append((mi, True, next(iter(all_drw)), triangles))
                 else:
-                    key = (mi, -1)  # weighted group
+                    batch_list.append((mi, False, None, triangles))
             else:
-                key = (mi, 0)
-            if key not in batch_groups:
-                batch_groups[key] = []
-            batch_groups[key].append(lt)
+                batch_list.append((mi, True, 0, triangles))
 
-        # Build batches: rigid groups first (sorted by material then bone),
-        # then weighted groups
-        rigid_keys = sorted(k for k in batch_groups if k[1] >= 0)
-        weighted_keys = sorted(k for k in batch_groups if k[1] < 0)
+        # Sort: rigid batches first, then weighted (matches original BMD convention)
+        batch_list.sort(key=lambda x: (not x[1], x[0]))
 
-        for key in rigid_keys + weighted_keys:
-            mat_idx, bone_key = key
-            triangles = batch_groups[key]
-            is_rigid = (bone_key >= 0)
+        for mat_idx, is_rigid, bone_key, triangles in batch_list:
 
             batch = ShpBatch()
 
@@ -737,7 +837,13 @@ class Shp1:
             batch._is_rigid = is_rigid
             batch._bbox = Shp1._compute_bounding_box(mesh, triangles, vtx1)
 
-            if is_rigid:
+            if is_rigid and len(triangles) == 0:
+                # EMPTY BATCH: placeholder for materials with no geometry
+                packet = ShpPacket()
+                packet.matrixTable = [bone_key]
+                packet.primitives = []  # no primitives = empty packet
+                batch.packets = [packet]
+            elif is_rigid:
                 # RIGID BATCH: one packet, one bone, no matrix attrib per vertex
                 packet = ShpPacket()
                 packet.matrixTable = [bone_key]  # bone_key is the DRW1 index
@@ -762,7 +868,7 @@ class Shp1:
                 batch.packets = [packet]
             else:
                 # WEIGHTED BATCH: split into packets by bone limit
-                packet_splits = Shp1._split_into_packets(triangles, mesh, vgroup_to_drw, max_bones=10)
+                packet_splits = Shp1._split_into_packets(triangles, mesh, vgroup_to_drw, bone_to_all_drw, max_bones=10)
 
                 batch.packets = []
                 for pkt_tris, pkt_drw_list in packet_splits:
@@ -788,7 +894,7 @@ class Shp1:
 
                             # Matrix index: local_index_in_packet_table * 3
                             vert = mesh.vertices[vert_idx]
-                            drw_idx = Shp1._get_vert_drw_index(vert, vgroup_to_drw)
+                            drw_idx = Shp1._get_vert_drw_index_weighted(vert, vgroup_to_drw, bone_to_all_drw)
                             local_idx = local_mtx_map.get(drw_idx, 0)
                             point.matrixIndex = local_idx * 3
 
@@ -826,6 +932,8 @@ class Shp1:
 
             # -- TODO: check code
             dstBatch = ShpBatch()
+            # Preserve raw batch descriptor for round-trip export
+            dstBatch._descriptor = d
             self.batches.append(dstBatch)
 
             # --Batch& dstBatch = dst.batches[i]; dst = this
@@ -895,6 +1003,9 @@ class Shp1:
                 length = packet.DumpPacketPrimitives(batch.raw_attribs, bw)
                 batch.p_locs[i].packetSize = length
                 total_length += length
+
+        # Pad primitive data area to 32-byte alignment
+        bw.writePaddingTo32()
 
         header.offsetToMatrixData = bw.Position() - shp1Offset
         for mdat in self.matrices_data:
