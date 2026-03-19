@@ -530,11 +530,13 @@ class Shp1:
 
             matrixData = Shp1MatrixData()
 
-            # useMtxIndex: use preserved value from import, or fall back to first table entry
+            # useMtxIndex: use preserved value from import for round-trip,
+            # otherwise write 0 (matches SuperBMD behavior).
+            # The original BMD uses specific DRW1 indices here, but the J3D
+            # runtime doesn't require them for weighted batches with per-vertex
+            # matrix indices. SuperBMD always writes 0 and models render correctly.
             if hasattr(packet, '_useMtxIndex'):
                 matrixData.unknown1 = packet._useMtxIndex
-            elif packet.matrixTable:
-                matrixData.unknown1 = packet.matrixTable[0]
             else:
                 matrixData.unknown1 = 0
             matrixData.count = len(packet.matrixTable)
@@ -1293,7 +1295,11 @@ class Shp1:
         header.offsetToMatrixTable = bw.Position() - shp1Offset
         for mtx in self.matrices_table:
             bw.writeWord(mtx)
-        bw.writePaddingTo16()
+        # GX display lists require 32-byte aligned addresses.
+        # Since the section itself is 32-byte aligned, offsetData must also
+        # be 32-byte aligned so that section_start + offsetData + packet_offset
+        # produces a 32-byte aligned absolute address for GXCallDisplayList.
+        bw.writePaddingTo32()
 
         header.offsetData = bw.Position() - shp1Offset
         total_length = 0
