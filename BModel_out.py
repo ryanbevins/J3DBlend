@@ -107,18 +107,18 @@ def find_mesh_object(bmodel):
 def mesh_was_modified(bmodel):
     """Check if the Blender mesh has been modified since import.
 
-    Compares vertex count between Blender mesh and original VTX1 positions.
-    If counts differ, mesh was edited.
+    Returns True only if the raw section data has been cleared (indicating
+    the sections need reconstruction). The vertex count heuristic was unreliable
+    because Blender's mesh.vertices count doesn't match VTX1's deduplicated
+    position pool count.
+
+    For now, raw round-trip is the default. Reconstruction only happens when
+    force_reconstruct=True is passed to export_bmd.
     """
-    mesh_obj = find_mesh_object(bmodel)
-    if mesh_obj is None:
-        return False  # can't find mesh, use raw round-trip
-
-    mesh = mesh_obj.data
-    orig_pos_count = len(bmodel.vtx.positions) if bmodel.vtx.positions else 0
-
-    # Simple heuristic: if vertex count changed, mesh was modified
-    if len(mesh.vertices) != orig_pos_count:
+    # If raw section data is missing from either VTX1 or SHP1, reconstruction is needed
+    if not hasattr(bmodel.vtx, '_rawSectionData') or bmodel.vtx._rawSectionData is None:
+        return True
+    if not hasattr(bmodel.shp, '_rawSectionData') or bmodel.shp._rawSectionData is None:
         return True
 
     return False

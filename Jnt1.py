@@ -186,6 +186,7 @@ class JntFrame:
 class Jnt1:
     def __init__(self):  # GENERATED!
         self.frames = []  # base position of bones, used as a reference to compute animations as a difference to this
+        self._rawSectionData = None
 
     def FromArmature(self, arm_obj):
         """Populate JNT1 frames from Blender armature using gc_ custom properties."""
@@ -237,6 +238,12 @@ class Jnt1:
         header = Jnt1Header()
         header.LoadData(br)
 
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(jnt1Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
+
         stringTable = br.ReadStringTable (jnt1Offset + header.stringTableOffset)
 
 
@@ -269,6 +276,10 @@ class Jnt1:
             self.frames[i] = f
 
     def DumpData(self, bw):
+        """Write JNT1 section. If raw data was captured during import, write it back."""
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
 
         jnt1Offset = bw.Position()
 

@@ -142,6 +142,7 @@ class Vtx1:
         self.texCoords= [[],[],[],[],[],[],[],[]]
         self.normals= []
         self.UVoffset = UVoffset  # DEBUG OPTION
+        self._rawSectionData = None
 
     def GetColor(self, ri, gi, bi, ai):
                 
@@ -366,11 +367,17 @@ class Vtx1:
                 log.warning('WRONG ArrayType in VTX1')
 
     def LoadData(self, br):
-                
+
         vtx1Offset = br.Position()
 
         header = Vtx1Header()
         header.LoadData(br)  # gets 64 bytes
+
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(vtx1Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
 
         # --messageBox "x"
         numArrays = 0
@@ -458,7 +465,11 @@ class Vtx1:
                             bw.writeShort(round(tc.t * scale))
 
     def DumpData(self, bw):
-        """Write VTX1 section to binary writer."""
+        """Write VTX1 section. If raw data was captured during import, write it back."""
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
+
         vtx1Offset = bw.Position()
 
         # Collect which array slots are active
@@ -653,7 +664,9 @@ class Vtx1:
         vtx.normals = []
 
         # --- UVs (per-loop, deduplicated, up to 8 layers) ---
-        num_uv_layers = min(len(mesh.uv_layers), 8)
+        # Filter to UV layers that actually have data
+        active_uv_layers = [uv for uv in mesh.uv_layers if len(uv.data) > 0]
+        num_uv_layers = min(len(active_uv_layers), 8)
         vtx.texCoords = [[] for _ in range(8)]
         uv_maps = [{} for _ in range(8)]  # (s,t) gc-space -> pool index per layer
 
@@ -688,7 +701,7 @@ class Vtx1:
             # UVs
             entry['texCoordIndex'] = [None] * 8
             for uv_idx in range(num_uv_layers):
-                uv_data = mesh.uv_layers[uv_idx].data[loop_idx].uv
+                uv_data = active_uv_layers[uv_idx].data[loop_idx].uv
                 # UV conversion: gc_v = 1.0 - blender_v
                 gc_uv = (round(uv_data[0], 6), round(1.0 - uv_data[1], 6))
                 if gc_uv not in uv_maps[uv_idx]:
