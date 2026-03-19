@@ -170,6 +170,7 @@ class ShpPacket:
                         # -- throw "shp1: got invalid attrib in packet. should never happen because dumpBatch() should check this before calling dumpPacket()"
                         # -- ignore unknown types, it's enough to warn() in dumpBatch
         bw.writeByte(0)  # create the incomplete 'termination primitive'
+        writtenBytes += 1
 
         return writtenBytes
 # ---------------------------------------------------------------------------------------------------------------------
@@ -475,12 +476,14 @@ class Shp1:
                 attrib.dataType = 3
                 attribs.append(attrib)
 
-        attrib = Shp1BatchAttrib()  # each batch must declare a 'separator attibute'
-        attrib.attrib = 0xff
-        attrib.dataType = 0xff
-        attribs.append(attrib)
+        # Separator goes into all_attribs (for the batch attribute table in the file)
+        # but NOT into batch.raw_attribs (which is passed to DumpPacketPrimitives)
+        separator = Shp1BatchAttrib()
+        separator.attrib = 0xff
+        separator.dataType = 0xff
 
         self.all_attribs += attribs
+        self.all_attribs.append(separator)
 
         batchDst.firstMatrixData = len(self.matrices_data)
 
@@ -770,7 +773,10 @@ class Shp1:
         for p_loc in self.all_p_locs:
             p_loc.DumpData(bw)
 
-        bw.writePaddingTo16()
+        # Pad to 32-byte alignment (BMD section boundary requirement)
+        remainder = (bw.Position() - shp1Offset) % 32
+        if remainder != 0:
+            bw.writePadding(32 - remainder)
         header.sizeOfSection = bw.Position() - shp1Offset
         bw.SeekSet(shp1Offset)
         header.DumpData(bw)

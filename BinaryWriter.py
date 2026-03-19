@@ -184,8 +184,9 @@ class BinaryWriter:
         self._f.write(b'\x00' * bcount)
 
     def writePaddingTo16(self):
-        length = 16 - (self._f.tell() % 16)
-        self.writePadding(length)
+        remainder = self._f.tell() % 16
+        if remainder != 0:
+            self.writePadding(16 - remainder)
 
     def addPadding(self, size):
         return 16 * (size//16 + 1)

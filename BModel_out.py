@@ -205,16 +205,14 @@ def export_bmd(filepath, bmodel, force_reconstruct=False):
 
     for tag, section in sections:
         section_start = bw.Position()
-        log.info("Writing %s at offset 0x%x", tag, section_start)
+        has_raw = hasattr(section, '_rawSectionData') and section._rawSectionData is not None
+        print("BMD Export: Writing %s at offset 0x%x (raw=%s)" % (tag, section_start, has_raw))
         section.DumpData(bw)
         section_end = bw.Position()
-        log.info("  %s size: %d bytes", tag, section_end - section_start)
-
-        # Pad to 32-byte alignment
-        remainder = bw.Position() % 32
-        if remainder != 0:
-            pad_count = 32 - remainder
-            bw.writePadding(pad_count)
+        section_size = section_end - section_start
+        print("BMD Export:   %s size: %d bytes (0x%x)" % (tag, section_size, section_size))
+        # No padding between sections — sizeOfSection includes internal padding,
+        # and the import loop uses sizeOfSection to find the next section tag.
 
     # Backfill file size
     file_size = bw.Position()
