@@ -179,8 +179,10 @@ def reconstruct_mesh_sections(bmodel):
     batch_order = [blender_mat for _, blender_mat in batch_mat_order]
     log.info("INF1 batch->material order: %s", batch_order)
 
-    # Reconstruct VTX1
-    new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(mesh_obj, jnt=jnt, drw=drw, evp=evp)
+    # Reconstruct VTX1 — computes per-vertex inverse skinning matrix from
+    # vertex groups. Single-bone → inv(bone_matrix). Multi-bone → inv(blended_matrix).
+    new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(
+        mesh_obj, jnt=jnt, drw=drw, evp=evp)
     if hasattr(bmodel.vtx, 'arrayFormats') and bmodel.vtx.arrayFormats:
         new_vtx.arrayFormats = bmodel.vtx.arrayFormats
     if hasattr(bmodel.vtx, '_formatSentinel'):
@@ -190,7 +192,7 @@ def reconstruct_mesh_sections(bmodel):
     # Reconstruct SHP1 (majority-vote: rigid or weighted per material batch)
     # Pass batch_order so batches are produced in the same order as the original INF1
     new_shp = Shp1.Shp1.FromBlenderMesh(
-        mesh_obj, new_vtx, loop_indices, bmodel.drw, batch_order=batch_order)
+        mesh_obj, new_vtx, loop_indices, bmodel.drw, batch_order=batch_order, evp1=evp)
     bmodel.shp = new_shp
 
     # INF1 is NOT touched — it stays as the raw data from import.

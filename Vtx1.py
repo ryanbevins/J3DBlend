@@ -676,58 +676,82 @@ class Vtx1:
 
         # --- Build per-vertex inverse matrix for un-transforming vertices ---
         #
-        # BMD stores vertex positions in two coordinate spaces:
-        #   - Rigid batches (single bone): bone-local space.
-        #     At runtime: world_pos = bone_world_matrix @ local_pos
-        #   - Weighted batches (multi-bone skinning): bind-pose world space.
-        #     At runtime: world_pos = blended_skinning_matrix @ bind_pos
-        #     (At bind pose, the skinning matrix ≈ identity, so bind_pos ≈ world_pos)
+        # During import, each vertex was transformed by a skinning matrix:
+        #   blender_pos = skinning_matrix @ vtx1_pos
         #
-        # For each vertex:
-        #   - If exactly 1 significant bone group → RIGID: apply inv(bone_world_matrix)
-        #   - If multiple significant groups → WEIGHTED: no transform (bind-pose world space)
+        # For rigid vertices (single bone):
+        #   skinning_matrix = bone_world_matrix
+        # For weighted vertices (multi-bone):
+        #   skinning_matrix = sum(weight_i * LocalMatrix(jnt, bone_i) @ evp.matrices[bone_i])
+        #
+        # To export, we reverse: vtx1_pos = inv(skinning_matrix) @ blender_pos
+        #
+        # This is computed from vertex groups for ALL vertices — no special cases.
         #
         vert_bone_inv_matrix = {}  # blender vert index -> inverse matrix (4x4)
         has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
                         and mesh_obj.parent.type == 'ARMATURE')
 
-        if has_armature and jnt is not None and drw is not None:
+        if has_armature and jnt is not None:
+            from . import Matrix44 as Mat44
             arm_obj = mesh_obj.parent
             bone_names = [b.name for b in arm_obj.data.bones]
 
-            vgroup_to_bone_name = {}
+            # Map vertex group index -> bone index
+            vgroup_to_bone_idx = {}
             for vg in mesh_obj.vertex_groups:
                 if vg.name in bone_names:
-                    vgroup_to_bone_name[vg.index] = vg.name
+                    vgroup_to_bone_idx[vg.index] = bone_names.index(vg.name)
 
-            # Use JNT1 frames for bone matrices if available, otherwise Blender armature rest pose
-            bone_world_matrix = {}
-            for bi, frame in enumerate(jnt.frames):
-                if bi < len(bone_names) and frame.matrix is not None:
-                    bone_world_matrix[bone_names[bi]] = frame.matrix
-
-            if not bone_world_matrix:
-                # Fallback: compute from Blender armature rest pose
-                for bone in arm_obj.data.bones:
-                    if bone.name in bone_names:
-                        bone_world_matrix[bone.name] = bone.matrix_local
+            # Precompute per-bone skinning component: LocalMatrix @ evp.inverseBind
+            bone_skin_component = {}  # bone_idx -> 4x4 matrix
+            for bi in range(len(jnt.frames)):
+                if jnt.frames[bi].matrix is not None:
+                    if evp is not None and bi < len(evp.matrices):
+                        # Weighted path: bone_world @ inverse_bind
+                        sm1 = evp.matrices[bi]
+                        sm2 = Mat44.LocalMatrix(jnt, bi, True)
+                        bone_skin_component[bi] = sm2 @ sm1
+                    else:
+                        # No EVP data: just use bone world matrix directly
+                        bone_skin_component[bi] = jnt.frames[bi].matrix
 
             for vi, vert in enumerate(mesh.vertices):
                 if not vert.groups:
                     continue
+
+                # Collect significant bone groups
                 sig_groups = []
                 for g in vert.groups:
-                    bname = vgroup_to_bone_name.get(g.group)
-                    if bname is not None and g.weight > 0.001:
-                        sig_groups.append((bname, g.weight))
+                    bi = vgroup_to_bone_idx.get(g.group)
+                    if bi is not None and g.weight > 0.001:
+                        sig_groups.append((bi, g.weight))
+
+                if not sig_groups:
+                    continue
+
                 if len(sig_groups) == 1:
-                    bname = sig_groups[0][0]
-                    mat = bone_world_matrix.get(bname)
+                    # Single bone — use bone world matrix directly (faster, more precise)
+                    bi = sig_groups[0][0]
+                    mat = jnt.frames[bi].matrix if bi < len(jnt.frames) else None
                     if mat is not None:
                         try:
                             vert_bone_inv_matrix[vi] = mat.inverted()
                         except ValueError:
                             pass
+                else:
+                    # Multiple bones — compute blended skinning matrix and invert
+                    m = MathMatrix()
+                    m.zero()
+                    for bi, w in sig_groups:
+                        comp = bone_skin_component.get(bi)
+                        if comp is not None:
+                            Mat44.Mad(m, comp, w)
+                    m[3][3] = 1.0
+                    try:
+                        vert_bone_inv_matrix[vi] = m.inverted()
+                    except ValueError:
+                        pass
 
         # --- Positions (full deduplication) ---
         pos_map = {}
