@@ -636,11 +636,15 @@ class Vtx1:
 
 
     @staticmethod
-    def FromBlenderMesh(mesh_obj):
+    def FromBlenderMesh(mesh_obj, jnt=None, drw=None):
         """Reconstruct VTX1 data from a Blender mesh object.
 
         Extracts positions, normals, UVs, and vertex colors from the Blender mesh,
         applies coordinate/UV conversions, and deduplicates into pools.
+
+        When jnt and drw are provided (imported BMD), vertex positions and normals
+        are transformed back to bone-local space by applying the inverse of the
+        bone's world matrix. This reverses the transform applied during import.
 
         Returns a new Vtx1 instance with populated pools and arrayFormats.
 
@@ -650,6 +654,7 @@ class Vtx1:
                 'colorIndex': [int, int], 'texCoordIndex': [int, int, ...]
             }
         """
+        from mathutils import Matrix as MathMatrix
         mesh = mesh_obj.data
         # Ensure we have loop triangles computed
         mesh.calc_loop_triangles()
@@ -660,6 +665,53 @@ class Vtx1:
         vtx = Vtx1()
         vtx.arrayFormats = None  # will be auto-built by DumpData
 
+        # --- Build bone inverse matrix table for un-transforming vertices ---
+        # During import, each vertex was transformed: world_pos = bone_matrix @ local_pos
+        # We need to reverse this: local_pos = bone_matrix^-1 @ world_pos
+        vert_bone_inv_matrix = {}  # blender vert index -> inverse bone matrix (4x4)
+        has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
+                        and mesh_obj.parent.type == 'ARMATURE')
+
+        if has_armature and jnt is not None and drw is not None and mesh_obj.vertex_groups:
+            arm_obj = mesh_obj.parent
+            bone_names = [b.name for b in arm_obj.data.bones]
+
+            # Build vgroup_index -> bone_index mapping
+            vgroup_to_bone = {}
+            for vg in mesh_obj.vertex_groups:
+                if vg.name in bone_names:
+                    vgroup_to_bone[vg.index] = bone_names.index(vg.name)
+
+            # Build bone_index -> DRW1 rigid entry -> JNT1 bone index mapping
+            # For rigid DRW1 entries: drw.data[drw_idx] = jnt bone index
+            # The import used jnt.frames[drw.data[drw_idx]].matrix as the transform
+            bone_to_jnt_matrix = {}
+            for bi in range(len(bone_names)):
+                # Find the rigid DRW1 entry for this bone
+                for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
+                    if not isW and data_val == bi:
+                        # This bone has a rigid DRW1 entry -> use jnt frame matrix
+                        if bi < len(jnt.frames) and jnt.frames[bi].matrix is not None:
+                            bone_to_jnt_matrix[bi] = jnt.frames[bi].matrix
+                        break
+                else:
+                    # No rigid DRW1 entry — use the JNT frame matrix directly
+                    # (these bones' vertices go through weighted path but still need un-transform)
+                    if bi < len(jnt.frames) and jnt.frames[bi].matrix is not None:
+                        bone_to_jnt_matrix[bi] = jnt.frames[bi].matrix
+
+            # For each vertex, find primary bone and compute inverse matrix
+            for vi, vert in enumerate(mesh.vertices):
+                if vert.groups:
+                    best_group = max(vert.groups, key=lambda g: g.weight)
+                    bone_idx = vgroup_to_bone.get(best_group.group, None)
+                    if bone_idx is not None and bone_idx in bone_to_jnt_matrix:
+                        mat = bone_to_jnt_matrix[bone_idx]
+                        try:
+                            vert_bone_inv_matrix[vi] = mat.inverted()
+                        except ValueError:
+                            pass  # singular matrix, skip
+
         # --- Positions (deduplicated from mesh vertices) ---
         # GC coordinate conversion: blender(x,y,z) -> gc(x, z, -y)
         pos_map = {}  # (x,y,z) gc-space -> pool index
@@ -668,8 +720,15 @@ class Vtx1:
 
         for vi, vert in enumerate(mesh.vertices):
             bx, by, bz = vert.co.x, vert.co.y, vert.co.z
-            gc_pos = (bx, bz, -by)
-            key = gc_pos
+            gc_pos_world = Vector((bx, bz, -by))
+
+            # Un-transform from world space to bone-local space
+            if vi in vert_bone_inv_matrix:
+                gc_pos = vert_bone_inv_matrix[vi] @ gc_pos_world
+            else:
+                gc_pos = gc_pos_world
+
+            key = (gc_pos.x, gc_pos.y, gc_pos.z)
             if key not in pos_map:
                 pos_map[key] = len(vtx.positions)
                 vtx.positions.append(Vector(gc_pos))
@@ -677,8 +736,11 @@ class Vtx1:
 
         # --- Normals (per-loop, deduplicated) ---
         # We use loop normals for per-face smooth/flat shading
+        # Normals also need to be un-transformed (import rotated them by bone matrix)
         nrm_map = {}  # (nx,ny,nz) gc-space -> pool index
         vtx.normals = []
+        # Build per-loop vertex index lookup for normal un-transform
+        _vert_bone_inv_matrix = vert_bone_inv_matrix
 
         # --- UVs (per-loop, deduplicated, up to 8 layers) ---
         # Filter to UV layers that actually have data
@@ -709,7 +771,13 @@ class Vtx1:
 
             # Normal (use loop normal for correct smooth/flat)
             nx, ny, nz = loop.normal.x, loop.normal.y, loop.normal.z
-            gc_nrm = (round(nx, 6), round(nz, 6), round(-ny, 6))
+            gc_nrm_vec = Vector((nx, nz, -ny))
+            # Un-rotate normal from world space to bone-local space
+            vi = loop.vertex_index
+            if vi in _vert_bone_inv_matrix:
+                gc_nrm_vec = gc_nrm_vec.copy()
+                gc_nrm_vec.rotate(_vert_bone_inv_matrix[vi])
+            gc_nrm = (round(gc_nrm_vec.x, 6), round(gc_nrm_vec.y, 6), round(gc_nrm_vec.z, 6))
             if gc_nrm not in nrm_map:
                 nrm_map[gc_nrm] = len(vtx.normals)
                 vtx.normals.append(Vector(gc_nrm))

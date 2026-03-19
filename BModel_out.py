@@ -139,7 +139,10 @@ def reconstruct_mesh_sections(bmodel):
     log.info("Reconstructing VTX1 and SHP1 from Blender mesh: %s", mesh_obj.name)
 
     # Reconstruct VTX1
-    new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(mesh_obj)
+    # Pass JNT1 and DRW1 so positions/normals can be un-transformed from world to bone-local space
+    jnt = getattr(bmodel, 'jnt', None)
+    drw = getattr(bmodel, 'drw', None)
+    new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(mesh_obj, jnt=jnt, drw=drw)
     # Preserve original arrayFormats if available (for encoding format)
     if hasattr(bmodel.vtx, 'arrayFormats') and bmodel.vtx.arrayFormats:
         new_vtx.arrayFormats = bmodel.vtx.arrayFormats
