@@ -976,7 +976,10 @@ class Shp1:
                     prim.points = []
 
                     for lt in triangles:
-                        for i in range(3):
+                        # Reverse winding: Blender uses CCW, GX uses CW.
+                        # The import (StripIterator) reversed winding for Blender;
+                        # we reverse it back by emitting vertices in order 0, 2, 1.
+                        for i in (0, 2, 1):
                             loop_idx = lt.loops[i]
                             li = loop_indices.get(loop_idx, {})
 
@@ -1024,7 +1027,8 @@ class Shp1:
                         prim.points = []
 
                         for lt in pkt_tris:
-                            for i in range(3):
+                            # Reverse winding: Blender CCW -> GX CW (emit 0, 2, 1)
+                            for i in (0, 2, 1):
                                 loop_idx = lt.loops[i]
                                 vert_idx = lt.vertices[i]
                                 li = loop_indices.get(loop_idx, {})
