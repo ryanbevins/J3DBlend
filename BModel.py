@@ -793,8 +793,8 @@ class BModel:
                 self._currMaterial["gc_mat_tevStageInfo"] = list(mat.tevStageInfo)
                 self._currMaterial["gc_mat_tevSwapModeInfo"] = list(mat.tevSwapModeInfo)
                 self._currMaterial["gc_mat_tevSwapModeTable"] = list(mat.tevSwapModeTable)
-                self._currMaterial["gc_mat_alphaCompIndex"] = list(mat.alphaCompIndex)
-                self._currMaterial["gc_mat_blendIndex"] = list(mat.blendIndex)
+                self._currMaterial["gc_mat_alphaCompIndex"] = mat.alphaCompIndex
+                self._currMaterial["gc_mat_blendIndex"] = mat.blendIndex
                 self._currMaterial["gc_mat_indices2"] = list(mat.indices2)
 
                 # Store texture header data for each referenced texture

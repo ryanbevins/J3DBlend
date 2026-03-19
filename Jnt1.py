@@ -93,7 +93,10 @@ class JntEntry:
         self.ry = round(f.ry * 32768./pi)
         self.rz = round(f.rz * 32768./pi)
 
-        self.tx, self.ty, self.tz = f.t.xyz
+        # Use raw floats to preserve -0.0 if available
+        self.tx = getattr(f, '_raw_tx', f.t.x)
+        self.ty = getattr(f, '_raw_ty', f.t.y)
+        self.tz = getattr(f, '_raw_tz', f.t.z)
         self.bbMin = f._bbMin if f._bbMin else [0.0, 0.0, 0.0]
         self.bbMax = f._bbMax if f._bbMax else [0.0, 0.0, 0.0]
 
@@ -198,11 +201,11 @@ class Jnt1:
             f.rx = bone.get("gc_rest_rx", 0.0)
             f.ry = bone.get("gc_rest_ry", 0.0)
             f.rz = bone.get("gc_rest_rz", 0.0)
-            f.t = Vector((
-                bone.get("gc_rest_tx", 0.0),
-                bone.get("gc_rest_ty", 0.0),
-                bone.get("gc_rest_tz", 0.0),
-            ))
+            # Store as raw floats to preserve -0.0 (Blender Vector normalizes it)
+            f._raw_tx = bone.get("gc_rest_tx", 0.0)
+            f._raw_ty = bone.get("gc_rest_ty", 0.0)
+            f._raw_tz = bone.get("gc_rest_tz", 0.0)
+            f.t = Vector((f._raw_tx, f._raw_ty, f._raw_tz))
             f.sx = bone.get("gc_rest_sx", 1.0)
             f.sy = bone.get("gc_rest_sy", 1.0)
             f.sz = bone.get("gc_rest_sz", 1.0)
@@ -271,10 +274,12 @@ class Jnt1:
 
         # prepare (incomplete) header, then write it
         header = Jnt1Header()
+        header.sizeOfSection = 0  # placeholder, backfilled at end
         header.count = len(self.frames)
-        header.jntEntryOffset = bw.addPadding(Jnt1Header.size)
+        header.jntEntryOffset = 0x18  # header is 20 bytes + 4 padding
         header.unknownOffset = header.jntEntryOffset + header.count*JntEntry.size
-        header.stringTableOffset = header.unknownOffset + 2 * header.count
+        rawStringTableOffset = header.unknownOffset + 2 * header.count
+        header.stringTableOffset = (rawStringTableOffset + 3) & ~3  # 4-byte align
         header.pad = 0xffff  # padding
 
         header.DumpData(bw)
@@ -296,6 +301,11 @@ class Jnt1:
 
         for i in range(header.count):
             bw.writeWord(i)
+
+        # Pad to 4-byte alignment before string table
+        padBytes = (jnt1Offset + header.stringTableOffset) - bw.Position()
+        if padBytes > 0:
+            bw.writePadding(padBytes)
 
         if bw.Position() != jnt1Offset + header.stringTableOffset:
             raise ValueError('incorrect lengths in writing Jnt1')

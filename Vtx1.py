@@ -576,6 +576,14 @@ class Vtx1:
         for i in activeSlots:
             self.arrayFormats[i].DumpData(bw)
 
+        # Write terminator descriptor (arrayType=0xFF)
+        bw.writeDword(0xFF)       # arrayType = terminator
+        bw.writeDword(0x01)       # componentCount
+        bw.writeDword(0x00)       # dataType
+        bw.writeByte(0x00)        # decimalPoint
+        bw.writeByte(0xFF)        # unknown3
+        bw.writeWord(0xFFFF)      # unknown4
+
         # Pad to first data offset
         if activeSlots:
             firstDataOffset = offsets[activeSlots[0]]

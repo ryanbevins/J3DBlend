@@ -1,5 +1,6 @@
 #! /usr/bin/python3
 import os
+import struct
 from .common import MessageBox
 from math import log2, floor, ceil
 import sys
@@ -131,6 +132,19 @@ class BinaryWriter:
         # w2 = chr(v & 0x00ff).encode()
         self._f.write(v.to_bytes(2, 'big'))  #(w1+w2)
 
+    @staticmethod
+    def _hashName(name):
+        h = 0
+        m = 1
+        if len(name) + 1 == 2:
+            m = 2
+        elif len(name) + 1 >= 3:
+            m = 3
+        for c in name:
+            h = (h * m) & 0xFFFF
+            h = (h + ord(c)) & 0xFFFF
+        return h
+
     def WriteStringTable(self, table):
 
         origin = self.Position()
@@ -150,8 +164,8 @@ class BinaryWriter:
             StringsPos = self.Position() - origin
 
             self.SeekSet(curPos)
-            self.writeWord(stringOffset)
-            self.writeWord(0xffff)  # unknown use
+            self.writeWord(self._hashName(table[i]))  # hash first
+            self.writeWord(stringOffset)               # offset second
 
         self.SeekSet(origin + StringsPos)
 
@@ -164,36 +178,10 @@ class BinaryWriter:
         self.writeWord(v)
 
     def writeFloat(self, v):
-        if v < 0:
-            neg = (1 << 31)
-            v *= -1
-        else:
-            neg = 0
-        if v == 0:
-            e = 0
-            m = 0
-        else:
-            e = int(floor(log2(v/0x1000000))+1 + 150)
-        if e < 0 or e > 0xff:
-            log.warning("float off range, assuming zero")
-            e = 0
-            m = 0
-
-        elif e == 0:
-            e = e << 23
-            m = int(v / 2**(-150)) >> 1
-        else:
-            e = e << 23
-            m = int(v/2**(floor(log2(v/0x1000000))+1))
-            if m < 0x800000 or m >= 0x1000000:
-                raise ValueError('float dump: bad m value')
-            m &= 0x7fffff
-        self.writeDword(neg | e | m)
+        self._f.write(struct.pack('>f', v))
 
     def writePadding(self, bcount):
-        string = 'This is padding data to alignme'
-        string = string * int(ceil(bcount/len(string)))
-        self.writeString(string[:bcount])
+        self._f.write(b'\x00' * bcount)
 
     def writePaddingTo16(self):
         length = 16 - (self._f.tell() % 16)
