@@ -155,6 +155,9 @@ class ShpPacket:
                         if common.GLOBALS.PARANOID:
                             raise ValueError('~the dev was an idiot~')
 
+                    if val is None:
+                        val = 0  # default for missing attribute data
+
                     if attribs[k].dataType == 1:  # -- s8
                         bw.writeByte(val)
                         writtenBytes += 1
@@ -659,14 +662,6 @@ class Shp1:
         has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
                         and mesh_obj.parent.type == 'ARMATURE')
 
-        # Group loop_triangles by material index
-        mat_groups = {}  # material_index -> list of loop_triangles
-        for lt in mesh.loop_triangles:
-            mi = lt.material_index
-            if mi not in mat_groups:
-                mat_groups[mi] = []
-            mat_groups[mi].append(lt)
-
         # Build vertex group -> DRW1 index mapping
         vgroup_to_drw = {}
         if has_armature and mesh_obj.vertex_groups:
@@ -681,40 +676,62 @@ class Shp1:
                             vgroup_to_drw[vg.index] = di
                             break
 
-        # Build batches (one per material)
-        for mat_idx in sorted(mat_groups.keys()):
-            triangles = mat_groups[mat_idx]
-            batch = ShpBatch()
-
-            # Determine if this batch is rigid (single bone) or weighted (multi-bone)
-            is_rigid = False
-            rigid_drw_idx = 0
+        # Group triangles by (material_index, primary_bone_drw_index).
+        # For each triangle, determine the primary bone from the heaviest
+        # vertex group of the first vertex. If all 3 vertices share the
+        # same primary bone, the triangle goes into a rigid group for that
+        # (material, bone) pair. Otherwise it goes into a weighted group
+        # keyed as (material, -1).
+        batch_groups = {}  # (mat_idx, bone_drw_idx_or_-1) -> [triangles]
+        for lt in mesh.loop_triangles:
+            mi = lt.material_index
             if has_armature:
-                is_rigid, rigid_drw_idx = Shp1._is_batch_rigid(mesh, triangles, vgroup_to_drw)
-                if rigid_drw_idx is None:
-                    rigid_drw_idx = 0
+                # Get primary bone for each vertex
+                vert_bones = []
+                for vi in lt.vertices:
+                    vert = mesh.vertices[vi]
+                    drw_idx = Shp1._get_vert_drw_index(vert, vgroup_to_drw)
+                    vert_bones.append(drw_idx)
+                # If all vertices share the same primary bone -> rigid group
+                if vert_bones[0] == vert_bones[1] == vert_bones[2]:
+                    key = (mi, vert_bones[0])
+                else:
+                    key = (mi, -1)  # weighted group
+            else:
+                key = (mi, 0)
+            if key not in batch_groups:
+                batch_groups[key] = []
+            batch_groups[key].append(lt)
+
+        # Build batches: rigid groups first (sorted by material then bone),
+        # then weighted groups
+        rigid_keys = sorted(k for k in batch_groups if k[1] >= 0)
+        weighted_keys = sorted(k for k in batch_groups if k[1] < 0)
+
+        for key in rigid_keys + weighted_keys:
+            mat_idx, bone_key = key
+            triangles = batch_groups[key]
+            is_rigid = (bone_key >= 0)
+
+            batch = ShpBatch()
 
             # Set attribute flags
             batch.attribs = ShpAttributes()
             batch.attribs.hasPositions = True
             batch.attribs.hasNormals = has_normals
-            # Only weighted batches need matrix indices
-            batch.attribs.hasMatrixIndices = has_armature and not is_rigid
+            batch.attribs.hasMatrixIndices = not is_rigid  # weighted batches need matrix attrib
             for uv in range(num_uv_layers):
                 batch.attribs.hasTexCoords[uv] = True
             for ci in range(num_color_layers):
                 batch.attribs.hasColors[ci] = True
 
-            # Store batch type for descriptor writing
             batch._is_rigid = is_rigid
-
-            # Compute bounding box for batch descriptor
             batch._bbox = Shp1._compute_bounding_box(mesh, triangles, vtx1)
 
             if is_rigid:
                 # RIGID BATCH: one packet, one bone, no matrix attrib per vertex
                 packet = ShpPacket()
-                packet.matrixTable = [rigid_drw_idx]
+                packet.matrixTable = [bone_key]  # bone_key is the DRW1 index
 
                 prim = ShpPrimitive()
                 prim.type = 0x90  # raw triangles
