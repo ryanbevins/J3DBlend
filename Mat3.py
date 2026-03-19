@@ -579,6 +579,14 @@ class Mat3:
         self.alphaCompares = []  # AlphaCompare
         self.blendInfos = []  # BlendInfo
         self.zModes = []  # ZMode
+        self._rawSectionData = None
+
+    def DumpData(self, bw):
+        """Write MAT3 section. Uses raw round-trip data from import."""
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
+        raise NotImplementedError("MAT3 reconstruction from scratch is not yet implemented")
 
     def LoadData(dst, f):
         # //warn("Mat3 section support is incomplete");
@@ -590,6 +598,12 @@ class Mat3:
         # //read header
         h = Mat3Header()
         h.LoadData(f)
+
+        # Store raw section bytes for round-trip export
+        savedPos = f.Position()
+        f.SeekSet(mat3Offset)
+        dst._rawSectionData = f._f.read(h.sizeOfSection)
+        f.SeekSet(savedPos)
 
         isMat1 = (h.tag == 'MAT1')
         isMat2 = (h.tag == 'MAT2')
