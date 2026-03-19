@@ -88,7 +88,15 @@ class Mdl3Header:
 
 class Mdl3:
     def __init__(self):
-        pass
+        self._rawSectionData = None
+
+    def DumpData(self, bw):
+        """Write MDL3 section. Uses raw round-trip data from import."""
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
+        # MDL3 is optional and not generated from scratch
+        raise NotImplementedError("MDL3 reconstruction from scratch is not supported")
 
     def LoadData(self, br):
                 
@@ -96,7 +104,13 @@ class Mdl3:
 
         header = Mdl3Header()
         header.LoadData(br)
-        
+
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(mdl3Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
+
         br.SeekSet(mdl3Offset + header.offsettosub1)
         
         offsets = (header.numberOfBones * 2 +1) * [0]  # the extra slot is here to avoid crashes
