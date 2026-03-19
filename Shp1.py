@@ -463,7 +463,7 @@ class Shp1:
             attrib.dataType = 3
             attribs.append(attrib)
         for i in (0, 1):
-            if batch.attribs.hasColor[i]:
+            if batch.attribs.hasColors[i]:
                 attrib = Shp1BatchAttrib()
                 attrib.attrib = 0xb+i
                 attrib.dataType = 3
@@ -519,6 +519,153 @@ class Shp1:
         self.all_p_locs += p_locs
 
     # end for i=1 to batchSrc.packetCount do
+
+    @staticmethod
+    def FromBlenderMesh(mesh_obj, vtx1, loop_indices, drw1):
+        """Reconstruct SHP1 from a Blender mesh, VTX1 pools, and loop index mapping.
+
+        Groups faces by material into batches. Each batch contains one packet
+        with all triangles emitted as raw triangle primitives (type 0x90).
+
+        Args:
+            mesh_obj: Blender mesh object
+            vtx1: Vtx1 instance with populated pools
+            loop_indices: dict from Vtx1.FromBlenderMesh, mapping loop_idx to indices
+            drw1: Drw1 instance (for matrix table references)
+
+        Returns a new Shp1 instance ready for DumpData.
+        """
+        mesh = mesh_obj.data
+        mesh.calc_loop_triangles()
+
+        shp = Shp1()
+        shp._rawSectionData = None  # force reconstruction path
+
+        # Determine which attributes are present
+        num_uv_layers = min(len(mesh.uv_layers), 8)
+        color_attrs = []
+        if hasattr(mesh, 'color_attributes'):
+            color_attrs = [ca for ca in mesh.color_attributes if ca.domain == 'CORNER']
+        elif hasattr(mesh, 'vertex_colors'):
+            color_attrs = list(mesh.vertex_colors)
+        num_color_layers = min(len(color_attrs), 2)
+
+        has_normals = len(vtx1.normals) > 0
+        has_matrix = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
+                      and mesh_obj.parent.type == 'ARMATURE')
+
+        # Group loop_triangles by material index
+        mat_groups = {}  # material_index -> list of loop_triangles
+        for lt in mesh.loop_triangles:
+            mi = lt.material_index
+            if mi not in mat_groups:
+                mat_groups[mi] = []
+            mat_groups[mi].append(lt)
+
+        # Determine vertex group -> bone index mapping for matrix indices
+        # The DRW1 data array maps drw_index -> joint_index (isWeighted=0) or evp_index (isWeighted=1)
+        # For simple rigid skinning: each vertex group = one bone = one DRW1 entry
+        vgroup_to_drw = {}
+        if has_matrix and mesh_obj.vertex_groups:
+            # Build map from vertex group index to DRW1 index
+            # For imported models, DRW1 data[i] = joint_index for rigid bones
+            # We need to find which DRW1 entry corresponds to each vertex group
+            arm_obj = mesh_obj.parent
+            bone_names = [b.name for b in arm_obj.data.bones]
+            for vg in mesh_obj.vertex_groups:
+                if vg.name in bone_names:
+                    bone_idx = bone_names.index(vg.name)
+                    # Find the DRW1 entry that maps to this bone
+                    for di, (isW, data_val) in enumerate(zip(drw1.isWeighted, drw1.data)):
+                        if not isW and data_val == bone_idx:
+                            vgroup_to_drw[vg.index] = di
+                            break
+                    else:
+                        # No existing DRW1 entry; use bone index directly
+                        vgroup_to_drw[vg.index] = bone_idx
+
+        # Build batches (one per material)
+        for mat_idx in sorted(mat_groups.keys()):
+            triangles = mat_groups[mat_idx]
+            batch = ShpBatch()
+
+            # Set attribute flags
+            batch.attribs = ShpAttributes()
+            batch.attribs.hasPositions = True
+            batch.attribs.hasNormals = has_normals
+            batch.attribs.hasMatrixIndices = has_matrix
+            for uv in range(num_uv_layers):
+                batch.attribs.hasTexCoords[uv] = True
+            for ci in range(num_color_layers):
+                batch.attribs.hasColors[ci] = True
+
+            # Build the single packet with all triangles
+            packet = ShpPacket()
+
+            # Build matrix table for this packet
+            # Collect all bones referenced by vertices in this batch
+            drw_indices_used = set()
+            if has_matrix:
+                for lt in triangles:
+                    for vi in lt.vertices:
+                        vert = mesh.vertices[vi]
+                        if vert.groups:
+                            # Find heaviest group
+                            best_group = max(vert.groups, key=lambda g: g.weight)
+                            if best_group.group in vgroup_to_drw:
+                                drw_indices_used.add(vgroup_to_drw[best_group.group])
+
+            if not drw_indices_used:
+                # No skinning or no groups: use a default entry
+                drw_indices_used = {0}
+
+            drw_list = sorted(drw_indices_used)
+            # Matrix table maps local packet matrix index -> DRW1 index
+            packet.matrixTable = drw_list
+            local_mtx_map = {drw_idx: local_idx for local_idx, drw_idx in enumerate(drw_list)}
+
+            # Build primitive (single triangle list: type 0x90)
+            prim = ShpPrimitive()
+            prim.type = 0x90
+            prim.points = []
+
+            for lt in triangles:
+                for i in range(3):
+                    loop_idx = lt.loops[i]
+                    vert_idx = lt.vertices[i]
+                    li = loop_indices.get(loop_idx, {})
+
+                    point = ShpIndex()
+                    point.posIndex = li.get('posIndex', 0)
+                    point.normalIndex = li.get('normalIndex', 0) if has_normals else 0
+
+                    # Matrix index: local_index * 3
+                    if has_matrix:
+                        vert = mesh.vertices[vert_idx]
+                        drw_idx = 0
+                        if vert.groups:
+                            best_group = max(vert.groups, key=lambda g: g.weight)
+                            drw_idx = vgroup_to_drw.get(best_group.group, 0)
+                        local_idx = local_mtx_map.get(drw_idx, 0)
+                        point.matrixIndex = local_idx * 3
+                    else:
+                        point.matrixIndex = 0
+
+                    # Tex coord indices
+                    tc_indices = li.get('texCoordIndex', [None]*8)
+                    point.texCoordIndex = list(tc_indices)
+
+                    # Color indices
+                    ci_indices = li.get('colorIndex', [None, None])
+                    point.colorIndex = list(ci_indices)
+
+                    prim.points.append(point)
+
+            packet.primitives = [prim]
+            batch.packets = [packet]
+            shp.batches.append(batch)
+
+        return shp
 
     def LoadData(self, br):
         shp1Offset = br.Position()

@@ -79,12 +79,88 @@ def find_model(context):
     return None
 
 
-def export_bmd(filepath, bmodel):
+def find_mesh_object(bmodel):
+    """Find the Blender mesh object associated with this BModel."""
+    # The mesh object was named after the BMD file
+    filename = getattr(bmodel, '_bmdFileName', None)
+    if filename and filename in bpy.data.objects:
+        obj = bpy.data.objects[filename]
+        if obj.type == 'MESH':
+            return obj
+
+    # Search all mesh objects for one that has an armature matching our model
+    for obj in bpy.data.objects:
+        if obj.type == 'MESH':
+            # Check if its parent armature name matches
+            if obj.parent and obj.parent.type == 'ARMATURE':
+                arm_name = obj.name + '_armature'
+                if obj.parent.name == arm_name:
+                    if filename and filename in obj.name:
+                        return obj
+            # Direct name match
+            if filename and obj.name.startswith(filename):
+                return obj
+
+    return None
+
+
+def mesh_was_modified(bmodel):
+    """Check if the Blender mesh has been modified since import.
+
+    Compares vertex count between Blender mesh and original VTX1 positions.
+    If counts differ, mesh was edited.
+    """
+    mesh_obj = find_mesh_object(bmodel)
+    if mesh_obj is None:
+        return False  # can't find mesh, use raw round-trip
+
+    mesh = mesh_obj.data
+    orig_pos_count = len(bmodel.vtx.positions) if bmodel.vtx.positions else 0
+
+    # Simple heuristic: if vertex count changed, mesh was modified
+    if len(mesh.vertices) != orig_pos_count:
+        return True
+
+    return False
+
+
+def reconstruct_mesh_sections(bmodel):
+    """Rebuild VTX1 and SHP1 from the current Blender mesh data.
+
+    Replaces bmodel.vtx and bmodel.shp with reconstructed versions.
+    Clears their raw section data so DumpData uses reconstruction.
+    """
+    mesh_obj = find_mesh_object(bmodel)
+    if mesh_obj is None:
+        log.warning("Cannot find Blender mesh object for reconstruction. Using raw round-trip.")
+        return
+
+    log.info("Reconstructing VTX1 and SHP1 from Blender mesh: %s", mesh_obj.name)
+
+    # Reconstruct VTX1
+    new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(mesh_obj)
+    # Preserve original arrayFormats if available (for encoding format)
+    if hasattr(bmodel.vtx, 'arrayFormats') and bmodel.vtx.arrayFormats:
+        new_vtx.arrayFormats = bmodel.vtx.arrayFormats
+    bmodel.vtx = new_vtx
+
+    # Reconstruct SHP1
+    new_shp = Shp1.Shp1.FromBlenderMesh(mesh_obj, new_vtx, loop_indices, bmodel.drw)
+    bmodel.shp = new_shp
+
+
+def export_bmd(filepath, bmodel, force_reconstruct=False):
     """Write a complete BMD file from imported section data.
 
     Header: 'J3D2bmd3' (8 bytes) + u32 file_size (backfill) + u32 section_count + 16 bytes padding.
     Sections in order: INF1, VTX1, EVP1, DRW1, JNT1, SHP1, MAT3, TEX1, [MDL3].
+
+    If the mesh has been modified (or force_reconstruct=True), VTX1 and SHP1
+    are reconstructed from the current Blender mesh data.
     """
+    # Check if mesh reconstruction is needed
+    if force_reconstruct or mesh_was_modified(bmodel):
+        reconstruct_mesh_sections(bmodel)
     bw = BinaryWriter.BinaryWriter()
     bw.Open(filepath)
 

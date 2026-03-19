@@ -576,14 +576,6 @@ class Vtx1:
         for i in activeSlots:
             self.arrayFormats[i].DumpData(bw)
 
-        # Write terminator descriptor (arrayType=0xFF)
-        bw.writeDword(0xFF)       # arrayType = terminator
-        bw.writeDword(0x01)       # componentCount
-        bw.writeDword(0x00)       # dataType
-        bw.writeByte(0x00)        # decimalPoint
-        bw.writeByte(0xFF)        # unknown3
-        bw.writeWord(0xFFFF)      # unknown4
-
         # Pad to first data offset
         if activeSlots:
             firstDataOffset = offsets[activeSlots[0]]
@@ -613,6 +605,129 @@ class Vtx1:
         bw.SeekSet(vtx1Offset + 4)
         bw.writeDword(sectionSize)
         bw.SeekSet(vtx1Offset + sectionSize)
+
+
+    @staticmethod
+    def FromBlenderMesh(mesh_obj):
+        """Reconstruct VTX1 data from a Blender mesh object.
+
+        Extracts positions, normals, UVs, and vertex colors from the Blender mesh,
+        applies coordinate/UV conversions, and deduplicates into pools.
+
+        Returns a new Vtx1 instance with populated pools and arrayFormats.
+
+        Also returns a per-loop index mapping dict for SHP1 to use:
+            loop_indices[loop_index] = {
+                'posIndex': int, 'normalIndex': int,
+                'colorIndex': [int, int], 'texCoordIndex': [int, int, ...]
+            }
+        """
+        mesh = mesh_obj.data
+        # Ensure we have loop triangles computed
+        mesh.calc_loop_triangles()
+        # Ensure normals are up to date
+        if hasattr(mesh, 'calc_normals_split'):
+            mesh.calc_normals_split()
+
+        vtx = Vtx1()
+        vtx.arrayFormats = None  # will be auto-built by DumpData
+
+        # --- Positions (deduplicated from mesh vertices) ---
+        # GC coordinate conversion: blender(x,y,z) -> gc(x, z, -y)
+        pos_map = {}  # (x,y,z) gc-space -> pool index
+        vtx.positions = []
+        vert_to_posIndex = {}  # blender vert index -> vtx1 pool index
+
+        for vi, vert in enumerate(mesh.vertices):
+            bx, by, bz = vert.co.x, vert.co.y, vert.co.z
+            gc_pos = (bx, bz, -by)
+            key = gc_pos
+            if key not in pos_map:
+                pos_map[key] = len(vtx.positions)
+                vtx.positions.append(Vector(gc_pos))
+            vert_to_posIndex[vi] = pos_map[key]
+
+        # --- Normals (per-loop, deduplicated) ---
+        # We use loop normals for per-face smooth/flat shading
+        nrm_map = {}  # (nx,ny,nz) gc-space -> pool index
+        vtx.normals = []
+
+        # --- UVs (per-loop, deduplicated, up to 8 layers) ---
+        num_uv_layers = min(len(mesh.uv_layers), 8)
+        vtx.texCoords = [[] for _ in range(8)]
+        uv_maps = [{} for _ in range(8)]  # (s,t) gc-space -> pool index per layer
+
+        # --- Vertex Colors (per-loop, deduplicated, up to 2 layers) ---
+        # Blender 5.0 uses color_attributes instead of vertex_colors
+        color_attrs = []
+        if hasattr(mesh, 'color_attributes'):
+            color_attrs = [ca for ca in mesh.color_attributes if ca.domain == 'CORNER']
+        elif hasattr(mesh, 'vertex_colors'):
+            color_attrs = list(mesh.vertex_colors)
+        num_color_layers = min(len(color_attrs), 2)
+        vtx.colors = [[] for _ in range(num_color_layers)]
+        color_maps = [{} for _ in range(2)]  # (r,g,b,a) 0-255 -> pool index per layer
+
+        # --- Build per-loop index mapping ---
+        loop_indices = {}
+
+        for loop_idx, loop in enumerate(mesh.loops):
+            entry = {}
+
+            # Position index
+            entry['posIndex'] = vert_to_posIndex[loop.vertex_index]
+
+            # Normal (use loop normal for correct smooth/flat)
+            nx, ny, nz = loop.normal.x, loop.normal.y, loop.normal.z
+            gc_nrm = (round(nx, 6), round(nz, 6), round(-ny, 6))
+            if gc_nrm not in nrm_map:
+                nrm_map[gc_nrm] = len(vtx.normals)
+                vtx.normals.append(Vector(gc_nrm))
+            entry['normalIndex'] = nrm_map[gc_nrm]
+
+            # UVs
+            entry['texCoordIndex'] = [None] * 8
+            for uv_idx in range(num_uv_layers):
+                uv_data = mesh.uv_layers[uv_idx].data[loop_idx].uv
+                # UV conversion: gc_v = 1.0 - blender_v
+                gc_uv = (round(uv_data[0], 6), round(1.0 - uv_data[1], 6))
+                if gc_uv not in uv_maps[uv_idx]:
+                    uv_maps[uv_idx][gc_uv] = len(vtx.texCoords[uv_idx])
+                    tc = TexCoord()
+                    tc.SetST(gc_uv[0], gc_uv[1])
+                    vtx.texCoords[uv_idx].append(tc)
+                entry['texCoordIndex'][uv_idx] = uv_maps[uv_idx][gc_uv]
+
+            # Vertex Colors
+            entry['colorIndex'] = [None, None]
+            for ci in range(num_color_layers):
+                ca = color_attrs[ci]
+                col = ca.data[loop_idx].color  # (r, g, b, a) as floats 0-1
+                # Quantize to u8 for dedup
+                r8 = min(255, max(0, round(col[0] * 255)))
+                g8 = min(255, max(0, round(col[1] * 255)))
+                b8 = min(255, max(0, round(col[2] * 255)))
+                a8 = min(255, max(0, round(col[3] * 255))) if len(col) > 3 else 255
+                gc_col = (r8, g8, b8, a8)
+                if gc_col not in color_maps[ci]:
+                    color_maps[ci][gc_col] = len(vtx.colors[ci])
+                    vtx.colors[ci].append((r8/255, g8/255, b8/255, a8/255))
+                entry['colorIndex'][ci] = color_maps[ci][gc_col]
+
+            loop_indices[loop_idx] = entry
+
+        # Clean up empty texcoord/color arrays
+        for i in range(8):
+            if not vtx.texCoords[i]:
+                vtx.texCoords[i] = []
+        for i in range(len(vtx.colors)):
+            if not vtx.colors[i]:
+                vtx.colors[i] = []
+        # Remove trailing empty color arrays
+        while vtx.colors and not vtx.colors[-1]:
+            vtx.colors.pop()
+
+        return vtx, loop_indices
 
 
 # small iter-generators to iterate triangles from GL_strips and GL_fans.
