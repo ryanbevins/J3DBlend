@@ -635,6 +635,9 @@ class BMD_PT_export_options_geometry_compression(bpy.types.Panel):
         col.prop(operator, 'export_normal_compression_enable', text="Normals")
         col.prop(operator, 'export_texcoord_compression_enable', text="UVs")
 
+        layout.separator()
+        layout.prop(operator, 'force_reconstruct', text="Force Reconstruct Mesh")
+
 
 class ExportBck(Operator, ExportHelper):
     """Exports the given action(s) as Nintendo's *.BCK format"""

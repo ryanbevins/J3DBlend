@@ -447,8 +447,6 @@ class Shp1:
 
     def decomposeBatch(self, bww, batch, header, baseOffset, batchDst):
 
-        batchDst.offsetToAttribs = len(self.all_attribs) * Shp1BatchAttrib.size
-
         # Set batch descriptor type: 0x00FF for rigid, 0x03FF for weighted
         is_rigid = getattr(batch, '_is_rigid', not batch.attribs.hasMatrixIndices)
         batchDst.unknown = 0x00ff if is_rigid else 0x03ff
@@ -486,14 +484,25 @@ class Shp1:
                 attrib.dataType = 3
                 attribs.append(attrib)
 
-        # Separator goes into all_attribs (for the batch attribute table in the file)
-        # but NOT into batch.raw_attribs (which is passed to DumpPacketPrimitives)
-        separator = Shp1BatchAttrib()
-        separator.attrib = 0xff
-        separator.dataType = 0xff
+        # Deduplicate attrib lists: check if an identical list already exists
+        attrib_sig = tuple((a.attrib, a.dataType) for a in attribs)
+        if not hasattr(self, '_attrib_cache'):
+            self._attrib_cache = {}  # signature -> byte offset
 
-        self.all_attribs += attribs
-        self.all_attribs.append(separator)
+        if attrib_sig in self._attrib_cache:
+            batchDst.offsetToAttribs = self._attrib_cache[attrib_sig]
+        else:
+            batchDst.offsetToAttribs = len(self.all_attribs) * Shp1BatchAttrib.size
+            self._attrib_cache[attrib_sig] = batchDst.offsetToAttribs
+
+            # Separator goes into all_attribs (for the batch attribute table in the file)
+            # but NOT into batch.raw_attribs (which is passed to DumpPacketPrimitives)
+            separator = Shp1BatchAttrib()
+            separator.attrib = 0xff
+            separator.dataType = 0x00
+
+            self.all_attribs += attribs
+            self.all_attribs.append(separator)
 
         batchDst.firstMatrixData = len(self.matrices_data)
 
@@ -864,8 +873,8 @@ class Shp1:
             d.DumpData(bw)
 
         header.offsetUnknown = bw.Position() - shp1Offset
-        for _ in range(header.batchCount):
-            bw.writeWord(0)
+        for i in range(header.batchCount):
+            bw.writeWord(i)
         bw.writePaddingTo16()
 
         header.offsetToBatchAttribs = bw.Position() - shp1Offset
