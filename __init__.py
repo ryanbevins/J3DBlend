@@ -520,6 +520,13 @@ class ExportBmd(Operator, ExportHelper):
         description='Compress vertex tex coord data',
         default=True
     )
+    force_reconstruct: BoolProperty(
+
+        name='Force Reconstruct Mesh',
+        description='Rebuild VTX1/SHP1 from Blender mesh even if unmodified. '
+                    'Use when mesh geometry has been edited.',
+        default=False
+    )
 
     def execute(self, context):
         global log_out
@@ -531,7 +538,8 @@ class ExportBmd(Operator, ExportHelper):
             return {'CANCELLED'}
 
         try:
-            file_size = BModel_out.export_bmd(self.filepath, bmodel)
+            file_size = BModel_out.export_bmd(self.filepath, bmodel,
+                                              force_reconstruct=self.force_reconstruct)
             self.report({'INFO'}, "BMD exported: %d bytes" % file_size)
         except Exception as err:
             log.critical('BMD export failed: %s', err)
