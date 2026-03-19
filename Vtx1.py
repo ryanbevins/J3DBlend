@@ -71,6 +71,14 @@ class ArrayFormat:
         self.decimalPoint = br.GetByte()
         self.unknown3 = br.GetByte()
         self.unknown4 = br.ReadWORD()
+
+    def DumpData(self, bw):
+        bw.writeDword(self.arrayType)
+        bw.writeDword(self.componentCount)
+        bw.writeDword(self.dataType)
+        bw.writeByte(self.decimalPoint)
+        bw.writeByte(getattr(self, 'unknown3', 0xff))
+        bw.writeWord(getattr(self, 'unknown4', 0xffff))
   
 
 class Vtx1Header:
@@ -394,6 +402,209 @@ class Vtx1:
                 else:
                     self.ReadVertexArray(f, len, br, (vtx1Offset+header.offsets[i]))
                 j += 1
+
+    def WriteVertexArray(self, af, bw):
+        """Write a single vertex array in the format described by af."""
+        if af.arrayType == 9:  # positions (xyz floats)
+            for pos in self.positions:
+                if af.dataType == 4:  # f32
+                    bw.writeFloat(pos.x)
+                    bw.writeFloat(pos.y)
+                    bw.writeFloat(pos.z)
+                elif af.dataType == 3:  # s16 fixed-point
+                    scale = 2**af.decimalPoint
+                    bw.writeShort(round(pos.x * scale))
+                    bw.writeShort(round(pos.y * scale))
+                    bw.writeShort(round(pos.z * scale))
+
+        elif af.arrayType == 0xa:  # normals (xyz)
+            for nrm in self.normals:
+                if af.dataType == 4:  # f32
+                    bw.writeFloat(nrm.x)
+                    bw.writeFloat(nrm.y)
+                    bw.writeFloat(nrm.z)
+                elif af.dataType == 3:  # s16 fixed-point
+                    scale = 2**af.decimalPoint
+                    bw.writeShort(round(nrm.x * scale))
+                    bw.writeShort(round(nrm.y * scale))
+                    bw.writeShort(round(nrm.z * scale))
+
+        elif af.arrayType in (0xb, 0xc):  # color0, color1
+            index = af.arrayType - 0xb
+            if index < len(self.colors):
+                for col in self.colors[index]:
+                    if af.componentCount == 1:  # rgba
+                        bw.writeByte(min(255, max(0, round(col[0] * 255))))
+                        bw.writeByte(min(255, max(0, round(col[1] * 255))))
+                        bw.writeByte(min(255, max(0, round(col[2] * 255))))
+                        bw.writeByte(min(255, max(0, round(col[3] * 255))))
+                    else:  # rgb
+                        bw.writeByte(min(255, max(0, round(col[0] * 255))))
+                        bw.writeByte(min(255, max(0, round(col[1] * 255))))
+                        bw.writeByte(min(255, max(0, round(col[2] * 255))))
+
+        elif 0xd <= af.arrayType <= 0x14:  # texcoords 0-7
+            index = af.arrayType - 0xd
+            if index < len(self.texCoords):
+                for tc in self.texCoords[index]:
+                    if af.dataType == 4:  # f32
+                        bw.writeFloat(tc.s)
+                        if af.componentCount == 1:  # st
+                            bw.writeFloat(tc.t)
+                    elif af.dataType == 3:  # s16 fixed-point
+                        scale = 2**af.decimalPoint
+                        bw.writeShort(round(tc.s * scale))
+                        if af.componentCount == 1:  # st
+                            bw.writeShort(round(tc.t * scale))
+
+    def DumpData(self, bw):
+        """Write VTX1 section to binary writer."""
+        vtx1Offset = bw.Position()
+
+        # Collect which array slots are active
+        activeSlots = []
+        if not hasattr(self, 'arrayFormats') or self.arrayFormats is None:
+            # Build default arrayFormats from available data
+            self.arrayFormats = [None] * 13
+            if self.positions:
+                af = ArrayFormat()
+                af.arrayType = 0x9
+                af.componentCount = 1  # xyz
+                af.dataType = 4  # f32
+                af.decimalPoint = 0
+                af.unknown3 = 0xff
+                af.unknown4 = 0xffff
+                self.arrayFormats[0] = af
+            if self.normals:
+                af = ArrayFormat()
+                af.arrayType = 0xa
+                af.componentCount = 0  # xyz
+                af.dataType = 4  # f32
+                af.decimalPoint = 0
+                af.unknown3 = 0xff
+                af.unknown4 = 0xffff
+                self.arrayFormats[1] = af
+            for ci in range(2):
+                if ci < len(self.colors) and self.colors[ci]:
+                    af = ArrayFormat()
+                    af.arrayType = 0xb + ci
+                    af.componentCount = 1  # rgba
+                    af.dataType = 5  # rgba8
+                    af.decimalPoint = 0
+                    af.unknown3 = 0xff
+                    af.unknown4 = 0xffff
+                    self.arrayFormats[3 + ci] = af
+            for ti in range(8):
+                if ti < len(self.texCoords) and self.texCoords[ti]:
+                    af = ArrayFormat()
+                    af.arrayType = 0xd + ti
+                    af.componentCount = 1  # st
+                    af.dataType = 4  # f32
+                    af.decimalPoint = 0
+                    af.unknown3 = 0xff
+                    af.unknown4 = 0xffff
+                    self.arrayFormats[5 + ti] = af
+
+        for i in range(13):
+            if self.arrayFormats[i] is not None:
+                activeSlots.append(i)
+
+        numArrays = len(activeSlots)
+
+        # VTX1 Header: tag(4) + size(4) + arrayFormatOffset(4) + offsets[13](52) = 64 bytes
+        HEADER_SIZE = 64
+        arrayFormatOffset = HEADER_SIZE  # formats start right after header
+        arrayFormatSize = numArrays * 16  # each ArrayFormat is 16 bytes
+
+        # Calculate data offsets — first data block starts after formats, aligned to 32
+        dataStart = arrayFormatOffset + arrayFormatSize
+        # Align to 32 bytes
+        dataStart = ((dataStart + 31) // 32) * 32
+
+        # Calculate size of each array's data
+        arraySizes = {}
+        for i in activeSlots:
+            af = self.arrayFormats[i]
+            size = 0
+            if af.arrayType == 0x9:  # positions
+                if af.dataType == 4:
+                    size = len(self.positions) * 3 * 4
+                elif af.dataType == 3:
+                    size = len(self.positions) * 3 * 2
+            elif af.arrayType == 0xa:  # normals
+                if af.dataType == 4:
+                    size = len(self.normals) * 3 * 4
+                elif af.dataType == 3:
+                    size = len(self.normals) * 3 * 2
+            elif af.arrayType in (0xb, 0xc):  # colors
+                idx = af.arrayType - 0xb
+                count = len(self.colors[idx]) if idx < len(self.colors) else 0
+                if af.componentCount == 1:  # rgba
+                    size = count * 4
+                else:  # rgb
+                    size = count * 3
+            elif 0xd <= af.arrayType <= 0x14:  # texcoords
+                idx = af.arrayType - 0xd
+                count = len(self.texCoords[idx]) if idx < len(self.texCoords) else 0
+                if af.dataType == 4:
+                    bytesPerComp = 4
+                elif af.dataType == 3:
+                    bytesPerComp = 2
+                else:
+                    bytesPerComp = 4
+                numComps = 2 if af.componentCount == 1 else 1
+                size = count * numComps * bytesPerComp
+            arraySizes[i] = size
+
+        # Assign offsets for each array
+        offsets = [0] * 13
+        currentOffset = dataStart
+        for i in activeSlots:
+            offsets[i] = currentOffset
+            currentOffset += arraySizes[i]
+            # Align each array to 32 bytes
+            currentOffset = ((currentOffset + 31) // 32) * 32
+
+        # Write header placeholder
+        bw.writeString("VTX1")
+        bw.writeDword(0)  # sizeOfSection placeholder
+        bw.writeDword(arrayFormatOffset)
+        for i in range(13):
+            bw.writeDword(offsets[i])
+
+        # Write array format descriptors
+        for i in activeSlots:
+            self.arrayFormats[i].DumpData(bw)
+
+        # Pad to first data offset
+        if activeSlots:
+            firstDataOffset = offsets[activeSlots[0]]
+            padNeeded = vtx1Offset + firstDataOffset - bw.Position()
+            if padNeeded > 0:
+                bw.writePadding(padNeeded)
+
+        # Write each array's data
+        for idx, i in enumerate(activeSlots):
+            bw.SeekSet(vtx1Offset + offsets[i])
+            self.WriteVertexArray(self.arrayFormats[i], bw)
+            # Pad to next array or end
+            if idx + 1 < len(activeSlots):
+                nextOffset = offsets[activeSlots[idx + 1]]
+                padNeeded = vtx1Offset + nextOffset - bw.Position()
+                if padNeeded > 0:
+                    bw.writePadding(padNeeded)
+
+        # Compute final section size (align to 32)
+        rawSize = bw.Position() - vtx1Offset
+        sectionSize = ((rawSize + 31) // 32) * 32
+        padNeeded = sectionSize - rawSize
+        if padNeeded > 0:
+            bw.writePadding(padNeeded)
+
+        # Go back and write section size
+        bw.SeekSet(vtx1Offset + 4)
+        bw.writeDword(sectionSize)
+        bw.SeekSet(vtx1Offset + sectionSize)
 
 
 # small iter-generators to iterate triangles from GL_strips and GL_fans.
