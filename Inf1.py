@@ -69,6 +69,7 @@ class SceneGraph:
 class Inf1:
     def __init__(self):  # GENERATED!
         self.rootSceneGraph = SceneGraph()
+        self._rawSectionData = None
 
     def buildSceneGraph(self, sg, j=0):
         """builds sceneGraph tree from inf1 descriptors in an array"""
@@ -104,24 +105,35 @@ class Inf1:
         e.index = sg.index
 
         dest.append(e)
-        relation_e = Inf1Entry()
-        relation_e.type = 0x01  # down
-        relation_e.index = 0
-        for s2 in sg.children:
-            self.extractEntries(s2, dest)
-        relation_e = Inf1Entry()
-        relation_e.type = 0x02  # up
-        relation_e.index = 0  # XCX are all the end delimitors here?
+        if sg.children:
+            down_e = Inf1Entry()
+            down_e.type = 0x01  # hierarchy down
+            down_e.index = 0
+            dest.append(down_e)
+            for s2 in sg.children:
+                self.extractEntries(s2, dest)
+            up_e = Inf1Entry()
+            up_e.type = 0x02  # hierarchy up
+            up_e.index = 0
+            dest.append(up_e)
 
 
 
     def LoadData(self, br):
-                
+
         inf1Offset = br.Position()
         self.entries = []  # -- vector<Inf1Entry>
         header = Inf1Header()
         header.LoadData(br)
         self.numVertices = header.vertexCount  # int no idea what's this good for ;-)
+        self._unknown1 = header.unknown1  # transform mode
+        self._packetCount = header.packetCount
+
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(inf1Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
 
         # -- read scene graph
         br.SeekSet(inf1Offset + header.offsetToEntries)
@@ -138,26 +150,30 @@ class Inf1:
 
 
     def DumpData(self, bw):
+        """Write INF1 section. If raw data was captured during import, write it back."""
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
+
         inf1Offset = bw.Position()
         self.entries = []
-        self.extractEntries(self.rootSceneGraph, self.entries)  # vector<Inf1Entry>
+        self.extractEntries(self.rootSceneGraph, self.entries)
 
+        # Terminator entry
         temp_e = Inf1Entry()
         temp_e.type = temp_e.index = 0
         self.entries.append(temp_e)
 
         header = Inf1Header()
         header.sizeOfSection = 0
-        header.unknown1 = 0
+        header.unknown1 = getattr(self, '_unknown1', 0)
         header.pad = 0xffff
-        header.packetCount = 0
+        header.packetCount = getattr(self, '_packetCount', 0)
         header.vertexCount = self.numVertices
         header.offsetToEntries = bw.addPadding(Inf1Header.size)
 
         header.DumpData(bw)
         bw.writePadding(header.offsetToEntries - Inf1Header.size)
-
-        # -- read scene graph
 
         if inf1Offset + header.offsetToEntries != bw.Position():
             raise ValueError('something went wrong with the sizes in inf1')
