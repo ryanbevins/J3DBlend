@@ -525,8 +525,19 @@ class ExportBmd(Operator, ExportHelper):
         global log_out
         retcode = 'FINISHED'
 
-        model_out = BModel_out()
-        model_out.export(is_bdl=False)
+        bmodel = BModel_out.find_model(context)
+        if bmodel is None:
+            self.report({'ERROR'}, "No imported BMD model found. Import a BMD first, then export.")
+            return {'CANCELLED'}
+
+        try:
+            file_size = BModel_out.export_bmd(self.filepath, bmodel)
+            self.report({'INFO'}, "BMD exported: %d bytes" % file_size)
+        except Exception as err:
+            log.critical('BMD export failed: %s', err)
+            self.report({'ERROR'}, "BMD export failed: %s" % err)
+            retcode = 'ERROR'
+            raise
 
         return {retcode}
 
@@ -780,8 +791,8 @@ class TOPBAR_MT_file_export_nintendo(bpy.types.Menu):
     bl_label = "Nintendo J3D (GameCube/Wii)"
 
     def draw(self, context):
-        #self.layout.operator(ExportBmd.bl_idname, text="Model (*.bmd, *.bdl)")
-        #self.layout.separator()
+        self.layout.operator(ExportBmd.bl_idname, text="Model (*.bmd)")
+        self.layout.separator()
         self.layout.operator(ExportBck.bl_idname, text="Joint Animation (*.bck)")
         #self.layout.operator(ExportBca.bl_idname, text="Joint Animation (*.bca)") # TODO
 

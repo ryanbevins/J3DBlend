@@ -15,7 +15,7 @@ log = logging.getLogger('bpy.ops.import_mesh.bmd.main')
 
 if LOADED:
     for module in (BinaryReader, BinaryWriter, Mat44, Inf1, Vtx1, Shp1, Jnt1, Evp1, Drw1,
-                   Bck, Mat3, Tex1, Mdl3, Btp, common, TexH, MatH, PBones):
+                   Bck, Mat3, Tex1, Mdl3, Btp, common, TexH, MatH, PBones, BModel_out):
         reload(module)
 
 else:
@@ -26,7 +26,8 @@ else:
         common,
         texhelper as TexH,
         materialhelper as MatH,
-        pseudobones as PBones
+        pseudobones as PBones,
+        BModel_out,
     )
 
 del LOADED
@@ -373,6 +374,10 @@ class BModel:
         # -- load model
         br = BinaryReader.BinaryReader()
         br.Open(filePath)
+
+        # Capture file header for round-trip export
+        br.SeekSet(0)
+        self._fileHeader = br._f.read(0x20)
 
         br.SeekSet(0x20)
 
@@ -1125,6 +1130,9 @@ class BModel:
             log.error('Could not extract images. This could be the cause of a plugin crash'
                       ' later on (error is %s)', err)
         self.DrawScene()
+
+        # Register this model for BMD export round-tripping
+        BModel_out.register_model(self._bmdFileName, self)
 
         try:
             self.CreateBTPDataFile()
