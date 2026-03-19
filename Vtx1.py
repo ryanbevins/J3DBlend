@@ -636,15 +636,17 @@ class Vtx1:
 
 
     @staticmethod
-    def FromBlenderMesh(mesh_obj, jnt=None, drw=None):
+    def FromBlenderMesh(mesh_obj, jnt=None, drw=None, evp=None):
         """Reconstruct VTX1 data from a Blender mesh object.
 
         Extracts positions, normals, UVs, and vertex colors from the Blender mesh,
         applies coordinate/UV conversions, and deduplicates into pools.
 
-        When jnt and drw are provided (imported BMD), vertex positions and normals
-        are transformed back to bone-local space by applying the inverse of the
-        bone's world matrix. This reverses the transform applied during import.
+        When jnt, drw, and evp are provided (imported BMD), vertex positions and
+        normals are transformed back to their original space by applying the inverse
+        of the transform used during import:
+        - Rigid vertices: inverse of bone world matrix (bone-local space)
+        - Weighted vertices: inverse of blended skinning matrix (bind/model space)
 
         Returns a new Vtx1 instance with populated pools and arrayFormats.
 
@@ -655,6 +657,7 @@ class Vtx1:
             }
         """
         from mathutils import Matrix as MathMatrix
+        from . import Matrix44 as Mat44
         mesh = mesh_obj.data
         # Ensure we have loop triangles computed
         mesh.calc_loop_triangles()
@@ -665,10 +668,12 @@ class Vtx1:
         vtx = Vtx1()
         vtx.arrayFormats = None  # will be auto-built by DumpData
 
-        # --- Build bone inverse matrix table for un-transforming vertices ---
-        # During import, each vertex was transformed: world_pos = bone_matrix @ local_pos
-        # We need to reverse this: local_pos = bone_matrix^-1 @ world_pos
-        vert_bone_inv_matrix = {}  # blender vert index -> inverse bone matrix (4x4)
+        # --- Build per-vertex inverse matrix for un-transforming vertices ---
+        # During import, each vertex was transformed: world_pos = mat @ original_pos
+        # For rigid: mat = jnt.frames[bone_idx].matrix
+        # For weighted: mat = sum(weight * LocalMatrix(jnt, bone) @ evp.matrices[bone])
+        # We reverse: original_pos = mat^-1 @ world_pos
+        vert_bone_inv_matrix = {}  # blender vert index -> inverse matrix (4x4)
         has_armature = (hasattr(mesh_obj, 'parent') and mesh_obj.parent is not None
                         and mesh_obj.parent.type == 'ARMATURE')
 
@@ -682,35 +687,66 @@ class Vtx1:
                 if vg.name in bone_names:
                     vgroup_to_bone[vg.index] = bone_names.index(vg.name)
 
-            # Build bone_index -> DRW1 rigid entry -> JNT1 bone index mapping
-            # For rigid DRW1 entries: drw.data[drw_idx] = jnt bone index
-            # The import used jnt.frames[drw.data[drw_idx]].matrix as the transform
-            bone_to_jnt_matrix = {}
-            for bi in range(len(bone_names)):
-                # Find the rigid DRW1 entry for this bone
-                for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
-                    if not isW and data_val == bi:
-                        # This bone has a rigid DRW1 entry -> use jnt frame matrix
-                        if bi < len(jnt.frames) and jnt.frames[bi].matrix is not None:
-                            bone_to_jnt_matrix[bi] = jnt.frames[bi].matrix
-                        break
-                else:
-                    # No rigid DRW1 entry — use the JNT frame matrix directly
-                    # (these bones' vertices go through weighted path but still need un-transform)
-                    if bi < len(jnt.frames) and jnt.frames[bi].matrix is not None:
-                        bone_to_jnt_matrix[bi] = jnt.frames[bi].matrix
+            # Determine which bones have rigid DRW1 entries
+            bone_has_rigid_drw = {}  # bone_idx -> True if has rigid DRW1 entry
+            for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
+                if not isW:
+                    bone_has_rigid_drw[data_val] = True
 
-            # For each vertex, find primary bone and compute inverse matrix
+            # Build DRW1 weighted entry -> blended skinning matrix cache
+            # For weighted entries, we replicate the same logic as updateMatrixTable
+            weighted_drw_matrix = {}  # drw_index -> blended matrix
+            if evp is not None:
+                for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
+                    if isW and data_val < len(evp.weightedIndices):
+                        mm = evp.weightedIndices[data_val]
+                        m = MathMatrix()
+                        m.zero()
+                        for r in range(len(mm.weights)):
+                            bone_idx = mm.indices[r]
+                            if bone_idx < len(evp.matrices) and bone_idx < len(jnt.frames):
+                                sm1 = evp.matrices[bone_idx]  # inverse bind matrix
+                                sm2 = Mat44.LocalMatrix(jnt, bone_idx, True)  # bone world matrix
+                                sm3 = sm2 @ sm1
+                                Mat44.Mad(m, sm3, mm.weights[r])
+                        m[3][3] = 1.0
+                        weighted_drw_matrix[di] = m
+
+            # For each vertex, compute the inverse of the transform used during import
             for vi, vert in enumerate(mesh.vertices):
-                if vert.groups:
-                    best_group = max(vert.groups, key=lambda g: g.weight)
-                    bone_idx = vgroup_to_bone.get(best_group.group, None)
-                    if bone_idx is not None and bone_idx in bone_to_jnt_matrix:
-                        mat = bone_to_jnt_matrix[bone_idx]
+                if not vert.groups:
+                    continue
+                best_group = max(vert.groups, key=lambda g: g.weight)
+                bone_idx = vgroup_to_bone.get(best_group.group, None)
+                if bone_idx is None:
+                    continue
+
+                if bone_idx in bone_has_rigid_drw:
+                    # Rigid vertex: import used jnt.frames[bone_idx].matrix
+                    if bone_idx < len(jnt.frames) and jnt.frames[bone_idx].matrix is not None:
+                        mat = jnt.frames[bone_idx].matrix
                         try:
                             vert_bone_inv_matrix[vi] = mat.inverted()
                         except ValueError:
-                            pass  # singular matrix, skip
+                            pass
+                else:
+                    # Weighted vertex: find which DRW1 weighted entry was used
+                    # The import assigns weighted vertices based on their EVP1 envelope.
+                    # We need to find the DRW1 weighted entry whose EVP1 envelope includes this bone.
+                    # Then use the cached blended skinning matrix.
+                    best_drw = None
+                    for di, (isW, data_val) in enumerate(zip(drw.isWeighted, drw.data)):
+                        if isW and data_val < len(evp.weightedIndices):
+                            mm = evp.weightedIndices[data_val]
+                            if bone_idx in mm.indices:
+                                best_drw = di
+                                break
+                    if best_drw is not None and best_drw in weighted_drw_matrix:
+                        mat = weighted_drw_matrix[best_drw]
+                        try:
+                            vert_bone_inv_matrix[vi] = mat.inverted()
+                        except ValueError:
+                            pass
 
         # --- Positions (deduplicated from mesh vertices) ---
         # GC coordinate conversion: blender(x,y,z) -> gc(x, z, -y)
