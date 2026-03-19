@@ -588,28 +588,25 @@ class Shp1:
             if g in vgroup_to_bone_idx
         )
 
-        # Exact match on bone set
+        # Exact match on bone set only — subset matching finds wrong envelopes
+        # with different weights, causing vertices to fly to wrong positions.
         drw = bone_set_to_drw.get(bone_indices)
         if drw is not None:
             return drw
 
-        # Try subsets (the vertex might have fewer significant groups than the envelope)
-        for key, drw_idx in bone_set_to_drw.items():
-            if bone_indices <= key:  # vertex bones are a subset of envelope bones
-                return drw_idx
-
-        # Fallback: find any weighted DRW that references the heaviest bone
+        # Fallback: rigid entry for heaviest bone. This applies a single bone
+        # transform which is approximately correct (in the right neighborhood).
         if sig_groups:
             best_vg = max(sig_groups, key=lambda x: x[1])[0]
+            rigid = vgroup_to_drw.get(best_vg)
+            if rigid is not None:
+                return rigid
+            # Try any weighted DRW referencing the heaviest bone
             bi = vgroup_to_bone_idx.get(best_vg)
             if bi is not None:
                 drw = bone_to_any_weighted_drw.get(bi)
                 if drw is not None:
                     return drw
-                # Last resort: rigid entry for the heaviest bone
-                rigid = vgroup_to_drw.get(best_vg)
-                if rigid is not None:
-                    return rigid
 
         return 0
 
