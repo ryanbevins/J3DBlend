@@ -133,8 +133,6 @@ class ShpPacket:
 
             bw.writeWord(len(curPrimative.points))
             writtenBytes += 2
-            curPrimative.points = []
-            # --  primative.points.resize(count)
             for curPoint in curPrimative.points:
                 for k in range(len(attribs)):
                     # -- set appropriate index
@@ -357,6 +355,7 @@ class Shp1:
         self.all_p_locs = []
         self.matrices_data = []
         self.matrices_table = []
+        self._rawSectionData = None
 
     def GetBatchAttribs(self, br, offset):
 
@@ -522,11 +521,15 @@ class Shp1:
     # end for i=1 to batchSrc.packetCount do
 
     def LoadData(self, br):
-        # -- print ("0: " + (br.Position() as string))
-
         shp1Offset = br.Position()
         header = Shp1Header()
         header.LoadData(br)
+
+        # Store raw section bytes for round-trip export
+        savedPos = br.Position()
+        br.SeekSet(shp1Offset)
+        self._rawSectionData = br._f.read(header.sizeOfSection)
+        br.SeekSet(savedPos)
 
         # -- print ("1: " + (br.Position() as string))
 
@@ -551,7 +554,10 @@ class Shp1:
             br.SeekSet(curPos)
 
     def DumpData(self, bw):
-        # -- print ("0: " + (br.Position() as string))
+        """Write SHP1 section. If raw data was captured during import, write it back."""
+        if self._rawSectionData is not None:
+            bw._f.write(self._rawSectionData)
+            return
 
         shp1Offset = bw.Position()
         header = Shp1Header()
@@ -585,22 +591,22 @@ class Shp1:
             bw.SeekSet(curPos)
             d.DumpData(bw)
 
-        header.offsetUnknown = bw.Position()
+        header.offsetUnknown = bw.Position() - shp1Offset
         for _ in range(header.batchCount):
             bw.writeWord(0)
         bw.writePaddingTo16()
 
-        header.offsetToBatchAttribs = bw.Position()
+        header.offsetToBatchAttribs = bw.Position() - shp1Offset
         for attrib in self.all_attribs:
             attrib.DumpData(bw)
         # this includes the separator attribs
 
-        header.offsetToMatrixTable = bw.Position()
+        header.offsetToMatrixTable = bw.Position() - shp1Offset
         for mtx in self.matrices_table:
             bw.writeWord(mtx)
         bw.writePaddingTo16()
 
-        header.offsetData = bw.Position()
+        header.offsetData = bw.Position() - shp1Offset
         total_length = 0
         for batch in self.batches:
             for i, packet in enumerate(batch.packets):
@@ -609,16 +615,16 @@ class Shp1:
                 batch.p_locs[i].packetSize = length
                 total_length += length
 
-        header.offsetToMatrixData = bw.Position()
+        header.offsetToMatrixData = bw.Position() - shp1Offset
         for mdat in self.matrices_data:
             mdat.DumpData(bw)
 
-        header.offsetToPacketLocations = bw.Position()
+        header.offsetToPacketLocations = bw.Position() - shp1Offset
         for p_loc in self.all_p_locs:
-            p_loc.DumpData()
+            p_loc.DumpData(bw)
 
         bw.writePaddingTo16()
         header.sizeOfSection = bw.Position() - shp1Offset
         bw.SeekSet(shp1Offset)
         header.DumpData(bw)
-        bw.Seekset(shp1Offset + header.sizeOfSection)
+        bw.SeekSet(shp1Offset + header.sizeOfSection)
