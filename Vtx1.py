@@ -805,7 +805,7 @@ class Vtx1:
                 gc_pos = vert_bone_inv_matrix[vi] @ gc_pos_world
             else:
                 gc_pos = gc_pos_world
-            key = (round(gc_pos.x, 4), round(gc_pos.y, 4), round(gc_pos.z, 4))
+            key = (float(gc_pos.x), float(gc_pos.y), float(gc_pos.z))
             if key not in pos_map:
                 pos_map[key] = len(vtx.positions)
                 vtx.positions.append(Vector(gc_pos))
@@ -854,7 +854,7 @@ class Vtx1:
             if vi in _vert_bone_inv_matrix:
                 gc_nrm_vec = gc_nrm_vec.copy()
                 gc_nrm_vec.rotate(_vert_bone_inv_matrix[vi])
-            gc_nrm = (round(gc_nrm_vec.x, 6), round(gc_nrm_vec.y, 6), round(gc_nrm_vec.z, 6))
+            gc_nrm = (float(gc_nrm_vec.x), float(gc_nrm_vec.y), float(gc_nrm_vec.z))
             if gc_nrm not in nrm_map:
                 nrm_map[gc_nrm] = len(vtx.normals)
                 vtx.normals.append(Vector(gc_nrm))
@@ -865,7 +865,8 @@ class Vtx1:
             for uv_idx in range(num_uv_layers):
                 uv_data = active_uv_layers[uv_idx].data[loop_idx].uv
                 # UV conversion: gc_v = 1.0 - blender_v
-                gc_uv = (round(uv_data[0], 6), round(1.0 - uv_data[1], 6))
+                # Use full float precision — rounding creates visible seams
+                gc_uv = (float(uv_data[0]), float(1.0 - uv_data[1]))
                 if gc_uv not in uv_maps[uv_idx]:
                     uv_maps[uv_idx][gc_uv] = len(vtx.texCoords[uv_idx])
                     tc = TexCoord()
