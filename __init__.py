@@ -270,7 +270,7 @@ class ImportBmd(Operator, ImportHelper):
         return {retcode}
 
     def draw(self, context):
-        pass
+        pass  # Drawn by sub-panels below
 
 
 class BMD_PT_import_options(bpy.types.Panel):
@@ -296,6 +296,7 @@ class BMD_PT_import_options(bpy.types.Panel):
 
         layout.prop(operator, 'no_rot_cv')
         layout.prop(operator, 'use_nodes')
+        layout.prop(operator, 'simplify_tev')
 
 
 class BMD_PT_import_animation(bpy.types.Panel):
