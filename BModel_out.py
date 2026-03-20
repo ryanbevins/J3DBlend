@@ -194,40 +194,71 @@ def _rebuild_inf1(bmodel, mesh_obj, shp, drw):
 
 
 def reconstruct_mesh_sections(bmodel):
-    """Rebuild VTX1 and SHP1 from the current Blender mesh.
+    """Rebuild ALL sections from Blender data. No raw/cached import data used.
 
-    INF1 is NOT rebuilt — it stays as the raw data from import.
-    The original INF1 scene graph references batches by index (0..N-1),
-    so SHP1 must produce exactly the same number of batches in the same
-    material order as the original.
+    This is the full reconstruction path — every section is rebuilt from the
+    Blender scene (armature, mesh, vertex groups). This allows verification
+    against the original BMD as a source of truth.
+
+    MAT3 and TEX1 are still raw (no builders yet) but everything else is
+    reconstructed from scratch.
     """
     mesh_obj = find_mesh_object(bmodel)
     if mesh_obj is None:
         log.warning("Cannot find Blender mesh object for reconstruction.")
         return
 
-    log.info("Reconstructing VTX1 and SHP1 from Blender mesh: %s", mesh_obj.name)
+    log.info("Full reconstruction from Blender data: %s", mesh_obj.name)
 
-    jnt = getattr(bmodel, 'jnt', None)
-    drw = getattr(bmodel, 'drw', None)
-    evp = getattr(bmodel, 'evp', None)
+    # Find armature
+    armature_obj = None
+    if mesh_obj.parent and mesh_obj.parent.type == 'ARMATURE':
+        armature_obj = mesh_obj.parent
 
-    # Extract original batch ordering from INF1 scene graph
-    # This gives us [(batch_index, blender_material_index), ...] in scene graph order
+    # --- Rebuild JNT1 from Blender armature ---
+    if armature_obj is not None:
+        from . import Jnt1
+        new_jnt = Jnt1.Jnt1.BuildFromArmature(armature_obj)
+        bmodel.jnt = new_jnt
+        log.info("Rebuilt JNT1: %d bones", len(new_jnt.frames))
+
+    # --- Rebuild EVP1 from mesh vertex groups + armature ---
+    if armature_obj is not None:
+        from . import Evp1
+        new_evp = Evp1.Evp1()
+        new_evp.BuildFromMesh(armature_obj, mesh_obj)
+        bmodel.evp = new_evp
+        log.info("Rebuilt EVP1: %d envelopes, %d inverse bind matrices",
+                 len(new_evp.weightedIndices), len(new_evp.matrices))
+
+    # --- Rebuild DRW1 from mesh vertex groups + EVP1 ---
+    if armature_obj is not None:
+        from . import Drw1
+        new_drw = Drw1.Drw1()
+        new_drw.BuildFromMesh(armature_obj, mesh_obj, bmodel.evp)
+        bmodel.drw = new_drw
+        log.info("Rebuilt DRW1: %d entries (%d rigid, %d weighted)",
+                 len(new_drw.data),
+                 sum(1 for w in new_drw.isWeighted if not w),
+                 sum(1 for w in new_drw.isWeighted if w))
+
+    jnt = bmodel.jnt
+    drw = bmodel.drw
+    evp = bmodel.evp
+
+    # Extract batch ordering from INF1 scene graph (still using original INF1
+    # for ordering, will be rebuilt after SHP1)
     batch_mat_order = _extract_batch_material_order(bmodel.inf)
-    # Sort by batch_index to get: batch 0 -> mat X, batch 1 -> mat Y, ...
     batch_mat_order.sort(key=lambda x: x[0])
     batch_order = [blender_mat for _, blender_mat in batch_mat_order]
     log.info("INF1 batch->material order: %s", batch_order)
 
-    # Pre-compute per-vertex DRW assignments so VTX1 and SHP1 agree
-    # on which transform each vertex uses.
+    # Pre-compute per-vertex DRW assignments
     vert_drw, mat_classification = Shp1.Shp1.PrecomputeVertexDRW(
         mesh_obj, drw, evp, batch_order)
     log.info("Pre-computed DRW assignments for %d vertices", len(vert_drw))
 
-    # Reconstruct VTX1 — uses DRW assignments for inverse skinning so that
-    # positions are consistent with the runtime transform SHP1 will apply.
+    # --- Rebuild VTX1 ---
     new_vtx, loop_indices = Vtx1.Vtx1.FromBlenderMesh(
         mesh_obj, jnt=jnt, drw=drw, evp=evp, vert_drw=vert_drw)
     if hasattr(bmodel.vtx, 'arrayFormats') and bmodel.vtx.arrayFormats:
@@ -236,13 +267,12 @@ def reconstruct_mesh_sections(bmodel):
         new_vtx._formatSentinel = bmodel.vtx._formatSentinel
     bmodel.vtx = new_vtx
 
-    # Reconstruct SHP1 (majority-vote: rigid or weighted per material batch)
-    # Pass batch_order so batches are produced in the same order as the original INF1
+    # --- Rebuild SHP1 ---
     new_shp = Shp1.Shp1.FromBlenderMesh(
-        mesh_obj, new_vtx, loop_indices, bmodel.drw, batch_order=batch_order, evp1=evp)
+        mesh_obj, new_vtx, loop_indices, drw, batch_order=batch_order, evp1=evp)
     bmodel.shp = new_shp
 
-    # Rebuild INF1 from the new SHP1 batch data and armature hierarchy
+    # --- Rebuild INF1 from new SHP1 + armature ---
     _rebuild_inf1(bmodel, mesh_obj, new_shp, drw)
 
 
