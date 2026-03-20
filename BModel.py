@@ -798,78 +798,6 @@ class BModel:
                 self._currMaterial["gc_mat_blendIndex"] = mat.blendIndex
                 self._currMaterial["gc_mat_indices2"] = list(mat.indices2)
 
-                # Store resolved TEV data for the panel display
-                mat3 = self._mat1
-                tevCount = mat3.tevCounts[mat.tevCountIndex] if mat.tevCountIndex < len(mat3.tevCounts) else 0
-                self._currMaterial["gc_tev_stageCount"] = tevCount
-
-                # Resolved cull mode
-                if mat.cullIndex < len(mat3.cullModes):
-                    self._currMaterial["gc_tev_cullMode"] = mat3.cullModes[mat.cullIndex]
-
-                # Resolved TEV stages
-                for si in range(tevCount):
-                    prefix = "gc_tev_%d_" % si
-
-                    # TEV order
-                    orderIdx = mat.tevOrderInfo[si]
-                    if orderIdx < len(mat3.tevOrderInfos):
-                        order = mat3.tevOrderInfos[orderIdx]
-                        self._currMaterial[prefix + "texMap"] = order.texMap
-                        self._currMaterial[prefix + "texCoordId"] = order.texCoordId
-                        self._currMaterial[prefix + "chanId"] = order.chanId
-
-                    # TEV stage info
-                    stageIdx = mat.tevStageInfo[si]
-                    if stageIdx < len(mat3.tevStageInfos):
-                        stage = mat3.tevStageInfos[stageIdx]
-                        self._currMaterial[prefix + "colorInA"] = stage.colorIn[0]
-                        self._currMaterial[prefix + "colorInB"] = stage.colorIn[1]
-                        self._currMaterial[prefix + "colorInC"] = stage.colorIn[2]
-                        self._currMaterial[prefix + "colorInD"] = stage.colorIn[3]
-                        self._currMaterial[prefix + "colorOp"] = stage.colorOp
-                        self._currMaterial[prefix + "colorBias"] = stage.colorBias
-                        self._currMaterial[prefix + "colorScale"] = stage.colorScale
-                        self._currMaterial[prefix + "colorClamp"] = stage.colorClamp
-                        self._currMaterial[prefix + "colorRegId"] = stage.colorRegId
-                        self._currMaterial[prefix + "alphaInA"] = stage.alphaIn[0]
-                        self._currMaterial[prefix + "alphaInB"] = stage.alphaIn[1]
-                        self._currMaterial[prefix + "alphaInC"] = stage.alphaIn[2]
-                        self._currMaterial[prefix + "alphaInD"] = stage.alphaIn[3]
-                        self._currMaterial[prefix + "alphaOp"] = stage.alphaOp
-                        self._currMaterial[prefix + "alphaBias"] = stage.alphaBias
-                        self._currMaterial[prefix + "alphaScale"] = stage.alphaScale
-                        self._currMaterial[prefix + "alphaClamp"] = stage.alphaClamp
-                        self._currMaterial[prefix + "alphaRegId"] = stage.alphaRegId
-
-                    # Konst selections
-                    self._currMaterial[prefix + "constColorSel"] = mat.constColorSel[si]
-                    self._currMaterial[prefix + "constAlphaSel"] = mat.constAlphaSel[si]
-
-                # Resolved blend info
-                if mat.blendIndex < len(mat3.blendInfos):
-                    bi = mat3.blendInfos[mat.blendIndex]
-                    self._currMaterial["gc_tev_blendMode"] = bi.blendMode
-                    self._currMaterial["gc_tev_blendSrcFactor"] = bi.srcFactor
-                    self._currMaterial["gc_tev_blendDstFactor"] = bi.dstFactor
-                    self._currMaterial["gc_tev_blendLogicOp"] = bi.logicOp
-
-                # Resolved z-mode
-                if mat.zModeIndex < len(mat3.zModes):
-                    zm = mat3.zModes[mat.zModeIndex]
-                    self._currMaterial["gc_tev_zEnable"] = int(zm.enable)
-                    self._currMaterial["gc_tev_zFunc"] = zm.zFunc
-                    self._currMaterial["gc_tev_zEnableUpdate"] = int(zm.enableUpdate)
-
-                # Resolved alpha compare
-                if mat.alphaCompIndex < len(mat3.alphaCompares):
-                    ac = mat3.alphaCompares[mat.alphaCompIndex]
-                    self._currMaterial["gc_tev_alphaComp0"] = ac.comp0
-                    self._currMaterial["gc_tev_alphaRef0"] = ac.ref0
-                    self._currMaterial["gc_tev_alphaOp"] = ac.alphaOp
-                    self._currMaterial["gc_tev_alphaComp1"] = ac.comp1
-                    self._currMaterial["gc_tev_alphaRef1"] = ac.ref1
-
                 # Store texture header data for each referenced texture
                 for texIdx in range(8):
                     stage = mat.texStages[texIdx]
@@ -1212,15 +1140,6 @@ class BModel:
         except Exception as err:
             log.warning('couldn\'t transform BTP animations into xml files. Model should beave normally nevertheless')
         log.debug('Finished import!')
-
-        # Switch Properties editor to Material tab so TEV panel is visible
-        try:
-            for area in bpy.context.screen.areas:
-                if area.type == 'PROPERTIES':
-                    area.spaces[0].context = 'MATERIAL'
-                    break
-        except Exception:
-            pass  # headless / no screen
 
     def __del__(self):
         if self._bones:
