@@ -74,13 +74,14 @@ if LOADED:
     reload(BModel_out)
     reload(Bck)
     reload(common)
+    reload(tev_panel)
     #log_out = log.handlers[1].stream  # kinda hacky, but it works (?)
 else:
     if not logging.root.handlers:
         # if this list is not empty, logging is configured.
         # here, it isn't
         config_logging()
-    from . import common, BModel, BModel_out, Bck
+    from . import common, BModel, BModel_out, Bck, tev_panel
 del LOADED
 
 log = logging.getLogger('bpy.ops.import_mesh.bmd')
@@ -870,8 +871,12 @@ def register():
     
     bpy.utils.register_class(CreateAnimationOperator)
 
+    tev_panel.register()
+
 
 def unregister():
+    tev_panel.unregister()
+
     bpy.utils.unregister_class(CreateAnimationOperator)
     
     bpy.utils.unregister_class(TOPBAR_MT_file_export_nintendo)
