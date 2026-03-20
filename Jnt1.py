@@ -164,6 +164,10 @@ class JntFrame:
         self.rz = (e.rz/32768. * pi)
 
         self.t = Vector((e.tx, e.ty, e.tz))  # displacement
+        # Preserve raw float values (Vector may normalize -0.0 to 0.0)
+        self._raw_tx = e.tx
+        self._raw_ty = e.ty
+        self._raw_tz = e.tz
 
         self._bbMin = e.bbMin  # is this even needed? (bounding box)
         self._bbMax = e.bbMax
@@ -186,10 +190,14 @@ class JntFrame:
 class Jnt1:
     def __init__(self):  # GENERATED!
         self.frames = []  # base position of bones, used as a reference to compute animations as a difference to this
-        self._rawSectionData = None
 
     def FromArmature(self, arm_obj):
         """Populate JNT1 frames from Blender armature using gc_ custom properties."""
+        import struct as _struct
+
+        def _bits2f(bits_val):
+            return _struct.unpack('>f', _struct.pack('>i', int(bits_val)))[0]
+
         self.frames = []
         self.matrices = []
         self.isMatrixValid = []
@@ -202,30 +210,49 @@ class Jnt1:
             f.rx = bone.get("gc_rest_rx", 0.0)
             f.ry = bone.get("gc_rest_ry", 0.0)
             f.rz = bone.get("gc_rest_rz", 0.0)
-            # Store as raw floats to preserve -0.0 (Blender Vector normalizes it)
-            f._raw_tx = bone.get("gc_rest_tx", 0.0)
-            f._raw_ty = bone.get("gc_rest_ty", 0.0)
-            f._raw_tz = bone.get("gc_rest_tz", 0.0)
+
+            has_bits = "gc_rest_tx_bits" in bone
+            if has_bits:
+                f._raw_tx = _bits2f(bone["gc_rest_tx_bits"])
+                f._raw_ty = _bits2f(bone["gc_rest_ty_bits"])
+                f._raw_tz = _bits2f(bone["gc_rest_tz_bits"])
+                f.sx = _bits2f(bone["gc_rest_sx_bits"])
+                f.sy = _bits2f(bone["gc_rest_sy_bits"])
+                f.sz = _bits2f(bone["gc_rest_sz_bits"])
+                f._bbMin = [
+                    _bits2f(bone["gc_bb_min_x_bits"]),
+                    _bits2f(bone["gc_bb_min_y_bits"]),
+                    _bits2f(bone["gc_bb_min_z_bits"]),
+                ]
+                f._bbMax = [
+                    _bits2f(bone["gc_bb_max_x_bits"]),
+                    _bits2f(bone["gc_bb_max_y_bits"]),
+                    _bits2f(bone["gc_bb_max_z_bits"]),
+                ]
+                f.jnt_unknown2 = _bits2f(bone.get("gc_jnt_unknown2_bits", 0))
+            else:
+                f._raw_tx = bone.get("gc_rest_tx", 0.0)
+                f._raw_ty = bone.get("gc_rest_ty", 0.0)
+                f._raw_tz = bone.get("gc_rest_tz", 0.0)
+                f.sx = bone.get("gc_rest_sx", 1.0)
+                f.sy = bone.get("gc_rest_sy", 1.0)
+                f.sz = bone.get("gc_rest_sz", 1.0)
+                f._bbMin = [
+                    bone.get("gc_bb_min_x", 0.0),
+                    bone.get("gc_bb_min_y", 0.0),
+                    bone.get("gc_bb_min_z", 0.0),
+                ]
+                f._bbMax = [
+                    bone.get("gc_bb_max_x", 0.0),
+                    bone.get("gc_bb_max_y", 0.0),
+                    bone.get("gc_bb_max_z", 0.0),
+                ]
+                f.jnt_unknown2 = bone.get("gc_jnt_unknown2", 0.0)
+
             f.t = Vector((f._raw_tx, f._raw_ty, f._raw_tz))
-            f.sx = bone.get("gc_rest_sx", 1.0)
-            f.sy = bone.get("gc_rest_sy", 1.0)
-            f.sz = bone.get("gc_rest_sz", 1.0)
-
-            f._bbMin = [
-                bone.get("gc_bb_min_x", 0.0),
-                bone.get("gc_bb_min_y", 0.0),
-                bone.get("gc_bb_min_z", 0.0),
-            ]
-            f._bbMax = [
-                bone.get("gc_bb_max_x", 0.0),
-                bone.get("gc_bb_max_y", 0.0),
-                bone.get("gc_bb_max_z", 0.0),
-            ]
-
             f.matrix_type = bone.get("gc_matrix_type", 0)
             f.jnt_pad = bone.get("gc_jnt_pad", 0x00ff)
             f.jnt_pad2 = bone.get("gc_jnt_pad2", 0xffff)
-            f.jnt_unknown2 = bone.get("gc_jnt_unknown2", 0.0)
 
             self.frames.append(f)
             self.matrices.append(None)
@@ -233,13 +260,18 @@ class Jnt1:
 
     @staticmethod
     def BuildFromArmature(armature_obj):
-        """Build JNT1 purely from Blender armature rest pose data.
+        """Build JNT1 from Blender armature rest pose data.
 
-        Does NOT rely on gc_* custom properties. Computes local transforms
-        from bone.matrix_local, converts from Blender Z-up to GC Y-up
-        coordinate space, and returns a Jnt1 with frames populated.
+        Uses gc_rest_* custom properties on bones (stored during import) to
+        reconstruct exact GC-space values. Falls back to bone.matrix_local
+        if no custom properties exist.
         """
         import math
+        import struct
+
+        def _bits2f(bits_val):
+            """Convert stored IEEE 754 bit pattern (signed int) back to float."""
+            return struct.unpack('>f', struct.pack('>i', int(bits_val)))[0]
 
         # Blender-to-Nintendo coordinate conversion matrix:
         # Blender (x, y, z) Z-up -> GC (x, z, -y) Y-up
@@ -247,16 +279,6 @@ class Jnt1:
                         [0, 0, 1, 0],
                         [0, -1, 0, 0],
                         [0, 0, 0, 1]])
-
-        def _radians_to_s16(rad):
-            """Convert radians to GC s16 rotation format."""
-            val = int(round(rad * 32768.0 / math.pi))
-            # Clamp to s16 range
-            if val > 32767:
-                val = 32767
-            elif val < -32768:
-                val = -32768
-            return val
 
         def _collect_bones_dfs(armature):
             """Collect bones in depth-first order matching BMD convention."""
@@ -272,7 +294,6 @@ class Jnt1:
             return result
 
         jnt = Jnt1()
-        jnt._rawSectionData = None  # force DumpData reconstruction
         jnt.frames = []
         jnt.matrices = []
         jnt.isMatrixValid = []
@@ -280,50 +301,101 @@ class Jnt1:
         ordered_bones = _collect_bones_dfs(armature_obj)
 
         for bone in ordered_bones:
-            # Compute local transform in Blender space
-            if bone.parent is not None:
-                local_mtx = bone.parent.matrix_local.inverted() @ bone.matrix_local
-            else:
-                local_mtx = bone.matrix_local.copy()
-
-            # Convert to GC coordinate space
-            # For root: gc_local = BtoN @ blender_local @ BtoN^-1
-            # For children: same — the parent-relative transform needs basis change
-            gc_local = BtoN @ local_mtx @ BtoN.inverted()
-
-            # Decompose into translation, rotation, scale
-            loc, quat, scale = gc_local.decompose()
-            euler = quat.to_euler('XYZ')
-
             f = JntFrame()
             f.name = bone.name
 
-            # Scale
-            f.sx = scale.x
-            f.sy = scale.y
-            f.sz = scale.z
+            # Prefer gc_rest_* custom properties (exact original GC-space values)
+            # Check for bits-based storage first (preserves -0.0), then legacy float props
+            has_bits_props = "gc_rest_tx_bits" in bone
+            has_gc_props = "gc_rest_rx" in bone
+            if has_bits_props or has_gc_props:
+                f.rx = bone["gc_rest_rx"]
+                f.ry = bone["gc_rest_ry"]
+                f.rz = bone["gc_rest_rz"]
 
-            # Rotation in radians (JntFrame stores radians; JntEntry.FromFrame converts to s16)
-            f.rx = euler.x
-            f.ry = euler.y
-            f.rz = euler.z
+                if has_bits_props:
+                    f._raw_tx = _bits2f(bone["gc_rest_tx_bits"])
+                    f._raw_ty = _bits2f(bone["gc_rest_ty_bits"])
+                    f._raw_tz = _bits2f(bone["gc_rest_tz_bits"])
+                    f.sx = _bits2f(bone["gc_rest_sx_bits"])
+                    f.sy = _bits2f(bone["gc_rest_sy_bits"])
+                    f.sz = _bits2f(bone["gc_rest_sz_bits"])
+                    f._bbMin = [
+                        _bits2f(bone["gc_bb_min_x_bits"]),
+                        _bits2f(bone["gc_bb_min_y_bits"]),
+                        _bits2f(bone["gc_bb_min_z_bits"]),
+                    ]
+                    f._bbMax = [
+                        _bits2f(bone["gc_bb_max_x_bits"]),
+                        _bits2f(bone["gc_bb_max_y_bits"]),
+                        _bits2f(bone["gc_bb_max_z_bits"]),
+                    ]
+                    f.jnt_unknown2 = _bits2f(bone.get("gc_jnt_unknown2_bits", 0))
+                else:
+                    # Legacy float properties (may lose -0.0)
+                    f._raw_tx = bone.get("gc_rest_tx", 0.0)
+                    f._raw_ty = bone.get("gc_rest_ty", 0.0)
+                    f._raw_tz = bone.get("gc_rest_tz", 0.0)
+                    f.sx = bone.get("gc_rest_sx", 1.0)
+                    f.sy = bone.get("gc_rest_sy", 1.0)
+                    f.sz = bone.get("gc_rest_sz", 1.0)
+                    f._bbMin = [
+                        bone.get("gc_bb_min_x", 0.0),
+                        bone.get("gc_bb_min_y", 0.0),
+                        bone.get("gc_bb_min_z", 0.0),
+                    ]
+                    f._bbMax = [
+                        bone.get("gc_bb_max_x", 0.0),
+                        bone.get("gc_bb_max_y", 0.0),
+                        bone.get("gc_bb_max_z", 0.0),
+                    ]
+                    f.jnt_unknown2 = bone.get("gc_jnt_unknown2", 0.0)
 
-            # Translation
-            f.t = Vector((loc.x, loc.y, loc.z))
+                f.t = Vector((f._raw_tx, f._raw_ty, f._raw_tz))
+                f.matrix_type = bone.get("gc_matrix_type", 0)
+                f.jnt_pad = bone.get("gc_jnt_pad", 0x00ff)
+                f.jnt_pad2 = bone.get("gc_jnt_pad2", 0xffff)
+            else:
+                # Fallback: compute from Blender bone.matrix_local
+                if bone.parent is not None:
+                    local_mtx = bone.parent.matrix_local.inverted() @ bone.matrix_local
+                else:
+                    local_mtx = bone.matrix_local.copy()
 
-            # Bounding box defaults
-            f._bbMin = [0.0, 0.0, 0.0]
-            f._bbMax = [0.0, 0.0, 0.0]
+                gc_local = BtoN @ local_mtx @ BtoN.inverted()
+                loc, quat, scale = gc_local.decompose()
+                euler = quat.to_euler('XYZ')
 
-            # Default JntEntry fields
-            f.matrix_type = 0
-            f.jnt_pad = 0x00ff
-            f.jnt_pad2 = 0xffff
-            f.jnt_unknown2 = 0.0
+                f.sx = scale.x
+                f.sy = scale.y
+                f.sz = scale.z
+                f.rx = euler.x
+                f.ry = euler.y
+                f.rz = euler.z
+                f.t = Vector((loc.x, loc.y, loc.z))
+                f._bbMin = [0.0, 0.0, 0.0]
+                f._bbMax = [0.0, 0.0, 0.0]
+                f.matrix_type = 0
+                f.jnt_pad = 0x00ff
+                f.jnt_pad2 = 0xffff
+                f.jnt_unknown2 = 0.0
 
             jnt.frames.append(f)
             jnt.matrices.append(None)
             jnt.isMatrixValid.append(False)
+
+        # Compute world matrices for each bone (needed by VTX1 inverse skinning).
+        # Same as CreateBones in BModel.py: world = parent_world @ local_transform
+        from . import Matrix44 as Mat44
+        bone_name_to_idx = {ordered_bones[i].name: i for i in range(len(ordered_bones))}
+        for i, bone in enumerate(ordered_bones):
+            if bone.parent is not None and bone.parent.name in bone_name_to_idx:
+                parent_idx = bone_name_to_idx[bone.parent.name]
+                parent_matrix = jnt.frames[parent_idx].matrix
+            else:
+                parent_matrix = Matrix.Identity(4)
+
+            jnt.frames[i].matrix = parent_matrix @ jnt.frames[i].getFrameMatrix()
 
         return jnt
 
@@ -333,12 +405,6 @@ class Jnt1:
 
         header = Jnt1Header()
         header.LoadData(br)
-
-        # Store raw section bytes for round-trip export
-        savedPos = br.Position()
-        br.SeekSet(jnt1Offset)
-        self._rawSectionData = br._f.read(header.sizeOfSection)
-        br.SeekSet(savedPos)
 
         stringTable = br.ReadStringTable (jnt1Offset + header.stringTableOffset)
 
@@ -372,11 +438,7 @@ class Jnt1:
             self.frames[i] = f
 
     def DumpData(self, bw):
-        """Write JNT1 section. If raw data was captured during import, write it back."""
-        if self._rawSectionData is not None:
-            bw._f.write(self._rawSectionData)
-            return
-
+        """Write JNT1 section from frame data."""
         jnt1Offset = bw.Position()
 
         # prepare (incomplete) header, then write it

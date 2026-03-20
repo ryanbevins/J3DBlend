@@ -180,8 +180,15 @@ class BinaryWriter:
     def writeFloat(self, v):
         self._f.write(struct.pack('>f', v))
 
+    _PAD_PATTERN = b"This is padding"
+
     def writePadding(self, bcount):
-        self._f.write(b'\x00' * bcount)
+        if bcount <= 0:
+            return
+        pat = self._PAD_PATTERN
+        full = (bcount // len(pat))
+        remainder = bcount % len(pat)
+        self._f.write(pat * full + pat[:remainder])
 
     def writePaddingTo16(self):
         remainder = self._f.tell() % 16

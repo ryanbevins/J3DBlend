@@ -35,41 +35,28 @@ class Drw1:
     def __init__(self):  # GENERATED!
         self.data= []
         self.isWeighted= []
-        self._rawSectionData = None
 
     def BuildFromMesh(self, armature_obj, mesh_obj, evp1):
-        """Build DRW1 draw matrix table from Blender mesh vertex groups.
-
-        Creates rigid entries (isWeighted=0, data=bone_index) for single-bone
-        vertices and weighted entries (isWeighted=1, data=evp_index) for
-        multi-bone vertices. Weighted entries are duplicated per Nintendo convention.
-
-        Args:
-            armature_obj: Blender armature object
-            mesh_obj: Blender mesh object (child of armature)
-            evp1: Evp1 instance with BuildFromMesh already called
-        """
+        """Build DRW1 draw matrix table from Blender mesh vertex groups."""
         bones = armature_obj.data.bones
         bone_names = [b.name for b in bones]
         mesh = mesh_obj.data
 
-        # Map vertex group index -> bone index
         vgroup_to_bone = {}
         for vg in mesh_obj.vertex_groups:
             if vg.name in bone_names:
                 vgroup_to_bone[vg.index] = bone_names.index(vg.name)
 
-        # Build EVP1 envelope lookup for matching vertex weights to envelope index
-        envelope_map = {}  # frozen key -> evp index
+        envelope_map = {}
         for ei, mm in enumerate(evp1.weightedIndices):
             key = tuple((mm.indices[j], round(mm.weights[j], 6))
                         for j in range(len(mm.indices)))
             envelope_map[key] = ei
 
-        rigid_set = set()    # bone indices seen
-        weighted_set = set() # evp indices seen
-        rigid_entries = []   # ordered by first appearance
-        weighted_entries = [] # ordered by first appearance
+        rigid_set = set()
+        weighted_set = set()
+        rigid_entries = []
+        weighted_entries = []
 
         for vert in mesh.vertices:
             sig_groups = [(g.group, g.weight) for g in vert.groups
@@ -83,7 +70,6 @@ class Drw1:
                     rigid_set.add(bone_idx)
                     rigid_entries.append(bone_idx)
             else:
-                # Normalize and sort to match EVP1 key
                 total = sum(w for _, w in sig_groups)
                 if total < 1e-6:
                     continue
@@ -95,10 +81,9 @@ class Drw1:
                     weighted_set.add(evp_idx)
                     weighted_entries.append(evp_idx)
 
-        # Sort rigid entries by bone index for deterministic output
         rigid_entries.sort()
+        weighted_entries.sort()
 
-        # Build final DRW1 arrays: rigid first, then weighted (duplicated)
         self.isWeighted = []
         self.data = []
 
@@ -106,14 +91,13 @@ class Drw1:
             self.isWeighted.append(False)
             self.data.append(bone_idx)
 
+        # Nintendo duplicates weighted entries as two complete sequential passes
         for evp_idx in weighted_entries:
-            # Nintendo tools duplicate each weighted entry
             self.isWeighted.append(True)
             self.data.append(evp_idx)
+        for evp_idx in weighted_entries:
             self.isWeighted.append(True)
             self.data.append(evp_idx)
-
-        self._rawSectionData = None  # force DumpData reconstruction
 
     def LoadData(self, br):
 
@@ -121,12 +105,6 @@ class Drw1:
 
         header = Drw1Header()
         header.LoadData(br)
-
-        # Store raw section bytes for round-trip export
-        savedPos = br.Position()
-        br.SeekSet(drw1Offset)
-        self._rawSectionData = br._f.read(header.sizeOfSection)
-        br.SeekSet(savedPos)
 
         # -- read bool array
         self.isWeighted = [False] * header.count
@@ -152,25 +130,19 @@ class Drw1:
             self.data[i] = br.ReadWORD()
 
     def DumpData(self, bw):
-        """Write DRW1 section. If raw data was captured during import, write it back."""
-        if hasattr(self, '_rawSectionData') and self._rawSectionData is not None:
-            bw._f.write(self._rawSectionData)
-            return
-
+        """Write DRW1 section."""
         drw1Offset = bw.Position()
 
         header = Drw1Header()
         header.count = len(self.data)
         if len(self.isWeighted) != header.count:
             raise ValueError('Broken Drw1 section')
-        header.pad = 0xff
-        header.offsetToIsWeighted = bw.addPadding(Drw1Header.size)
+        header.pad = 0xffff
+        header.offsetToIsWeighted = Drw1Header.size  # No padding after header
         header.offsetToData = header.offsetToIsWeighted + header.count
         header.sizeOfSection = bw.addPadding(header.offsetToData + 2*header.count)
 
         header.DumpData(bw)
-
-        bw.writePadding(header.offsetToIsWeighted - Drw1Header.size)
 
         for isW in self.isWeighted:
             bw.writeByte(int(isW))

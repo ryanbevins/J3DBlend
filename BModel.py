@@ -310,6 +310,45 @@ class BModel:
                     bpy.context.view_layer.update()
                     bpy.ops.object.mode_set(mode='OBJECT')
 
+                    # Store GC rest-pose as custom properties on bones for export
+                    import struct as _struct
+                    def _f2bits(v):
+                        # Store as signed 32-bit int (Blender IDProperty uses C int)
+                        return _struct.unpack('>i', _struct.pack('>f', v))[0]
+
+                    for bone in self._bones:
+                        bname = bone.name.fget()
+                        refpos = bone.jnt_frame
+                        bdata = arm_obj.data.bones[bname]
+                        # Rotation stored as radians (converted from shorts, no -0.0 concern)
+                        bdata["gc_rest_rx"] = refpos.rx
+                        bdata["gc_rest_ry"] = refpos.ry
+                        bdata["gc_rest_rz"] = refpos.rz
+                        # Store all float fields as IEEE 754 bit patterns (ints)
+                        # to preserve -0.0 across Blender save/reload
+                        raw_tx = getattr(refpos, '_raw_tx', refpos.t.x)
+                        raw_ty = getattr(refpos, '_raw_ty', refpos.t.y)
+                        raw_tz = getattr(refpos, '_raw_tz', refpos.t.z)
+                        bdata["gc_rest_tx_bits"] = _f2bits(raw_tx)
+                        bdata["gc_rest_ty_bits"] = _f2bits(raw_ty)
+                        bdata["gc_rest_tz_bits"] = _f2bits(raw_tz)
+                        bdata["gc_rest_sx_bits"] = _f2bits(refpos.sx)
+                        bdata["gc_rest_sy_bits"] = _f2bits(refpos.sy)
+                        bdata["gc_rest_sz_bits"] = _f2bits(refpos.sz)
+                        bbMin = refpos._bbMin if refpos._bbMin else [0.0, 0.0, 0.0]
+                        bbMax = refpos._bbMax if refpos._bbMax else [0.0, 0.0, 0.0]
+                        bdata["gc_bb_min_x_bits"] = _f2bits(bbMin[0])
+                        bdata["gc_bb_min_y_bits"] = _f2bits(bbMin[1])
+                        bdata["gc_bb_min_z_bits"] = _f2bits(bbMin[2])
+                        bdata["gc_bb_max_x_bits"] = _f2bits(bbMax[0])
+                        bdata["gc_bb_max_y_bits"] = _f2bits(bbMax[1])
+                        bdata["gc_bb_max_z_bits"] = _f2bits(bbMax[2])
+                        bdata["gc_matrix_type"] = getattr(refpos, 'matrix_type', 0)
+                        bdata["gc_jnt_pad"] = getattr(refpos, 'jnt_pad', 0x00ff)
+                        bdata["gc_jnt_pad2"] = getattr(refpos, 'jnt_pad2', 0xffff)
+                        bdata["gc_jnt_unknown2_bits"] = _f2bits(getattr(refpos, 'jnt_unknown2', 0.0))
+
+
             except Exception as err:
                 log.error('Animation bones not created. Animtions will fail. (error is %s)', err)
 

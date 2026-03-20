@@ -215,11 +215,35 @@ def reconstruct_mesh_sections(bmodel):
     if mesh_obj.parent and mesh_obj.parent.type == 'ARMATURE':
         armature_obj = mesh_obj.parent
 
-    # JNT1, EVP1, DRW1: Use raw import data for now.
-    # The from-scratch builders (BuildFromArmature, BuildFromMesh) exist but
-    # produce coordinate conversion differences that cause deformation.
-    # These need debugging before they can replace the raw path.
-    # For imported models, the raw data is correct and byte-identical.
+    # --- Rebuild JNT1 from Blender armature ---
+    if armature_obj is not None:
+        new_jnt = Jnt1.Jnt1.BuildFromArmature(armature_obj)
+        bmodel.jnt = new_jnt
+
+    # --- Rebuild EVP1 from mesh vertex groups + armature ---
+    # If original EVP1 was loaded from file (has matrices and weightedIndices),
+    # preserve it — the envelopes and inverse bind matrices must match exactly
+    # for SHP1 matrix table references to work correctly.
+    # Only rebuild from scratch if no original data exists.
+    if armature_obj is not None:
+        old_evp = bmodel.evp
+        has_loaded_evp = (hasattr(old_evp, 'matrices') and old_evp.matrices
+                          and hasattr(old_evp, 'weightedIndices') and old_evp.weightedIndices)
+        if not has_loaded_evp:
+            new_evp = Evp1.Evp1()
+            new_evp.BuildFromMesh(armature_obj, mesh_obj, jnt=bmodel.jnt, inf=bmodel.inf)
+            bmodel.evp = new_evp
+
+    # --- Rebuild DRW1 from mesh vertex groups + EVP1 ---
+    # Preserve original DRW1 if loaded from file (ordering must match SHP1 refs).
+    if armature_obj is not None:
+        old_drw = bmodel.drw
+        has_loaded_drw = (hasattr(old_drw, 'data') and old_drw.data
+                          and hasattr(old_drw, 'isWeighted') and old_drw.isWeighted)
+        if not has_loaded_drw:
+            new_drw = Drw1.Drw1()
+            new_drw.BuildFromMesh(armature_obj, mesh_obj, bmodel.evp)
+            bmodel.drw = new_drw
 
     jnt = bmodel.jnt
     drw = bmodel.drw

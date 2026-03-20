@@ -391,17 +391,10 @@ class BinaryReader:
         return signedValue
 
     def GetFloat(self):
-        bits = self.ReadDWORD()
-        s =-1
-        if (bits >> 31) == 0 :
-            s = 1
-        e = (bits >> 23) & 0xff
-        m = 0
-        if e == 0 :
-            m =(bits & 0x7fffff) << 1
-        else:
-            m = (bits & 0x7fffff) | 0x800000
-        fx = s * m * (2**(e-150))
-        return fx
+        import struct
+        data = self._f.read(4)
+        if len(data) < 4:
+            raise ValueError("GetFloat: unexpected end of file")
+        return struct.unpack('>f', data)[0]
 
 

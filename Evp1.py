@@ -49,7 +49,6 @@ class Evp1:
     def __init__(self):  # GENERATED!
         self.matrices = []
         self.weightedIndices = []
-        self._rawSectionData = None
 
     def LoadData(self, br):
 
@@ -57,12 +56,6 @@ class Evp1:
 
         header = Evp1Header()
         header.LoadData(br)
-
-        # Store raw section bytes for round-trip export
-        savedPos = br.Position()
-        br.SeekSet(evp1Offset)
-        self._rawSectionData = br._f.read(header.sizeOfSection)
-        br.SeekSet(savedPos)
 
         # -- read counts array
         br.SeekSet(evp1Offset + header.offsets[0])
@@ -99,6 +92,13 @@ class Evp1:
 
 
         # -- read matrices
+        # Compute actual matrix count from section layout (not just max referenced index)
+        # Each matrix is 3x4 floats = 48 bytes
+        matBytesAvailable = header.sizeOfSection - header.offsets[3]
+        actualNumMatrices = matBytesAvailable // 48
+        # Use whichever is larger: referenced count or stored count
+        numMatrices = max(numMatrices, actualNumMatrices)
+
         self.matrices = []  # size: numMatrices
         br.SeekSet(evp1Offset + header.offsets[3])
         self.matrices = [None] * numMatrices
@@ -132,11 +132,96 @@ class Evp1:
         ))
         return S @ blender_mtx @ S_inv
 
-    def BuildFromMesh(self, armature_obj, mesh_obj):
+    @staticmethod
+    def _gc_world_matrix_from_props(bone, all_bones_by_name):
+        """Reconstruct a bone's GC-space world matrix from gc_rest_* properties.
+
+        Walks up the parent chain, composing local transforms in GC space
+        to produce the world matrix for this bone.
+        """
+        from mathutils import Euler as _Euler
+        import struct as _struct
+
+        def _bits2f(bits_val):
+            return _struct.unpack('>f', _struct.pack('>i', int(bits_val)))[0]
+
+        def _local_gc_matrix(b):
+            rx = b.get("gc_rest_rx", 0.0)
+            ry = b.get("gc_rest_ry", 0.0)
+            rz = b.get("gc_rest_rz", 0.0)
+            if "gc_rest_tx_bits" in b:
+                tx = _bits2f(b["gc_rest_tx_bits"])
+                ty = _bits2f(b["gc_rest_ty_bits"])
+                tz = _bits2f(b["gc_rest_tz_bits"])
+            else:
+                tx = b.get("gc_rest_tx", 0.0)
+                ty = b.get("gc_rest_ty", 0.0)
+                tz = b.get("gc_rest_tz", 0.0)
+            t_mtx = Matrix.Translation((tx, ty, tz))
+            r_mtx = _Euler((rx, ry, rz), 'XYZ').to_matrix().to_4x4()
+            return t_mtx @ r_mtx
+
+        # Build chain from root to this bone
+        chain = []
+        b = bone
+        while b is not None:
+            chain.append(b)
+            b = b.parent
+        chain.reverse()
+
+        world = Matrix.Identity(4)
+        for b in chain:
+            world = world @ _local_gc_matrix(b)
+        return world
+
+    @staticmethod
+    def _compute_world_matrices_from_scenegraph(jnt, inf):
+        """Walk INF1 scene graph to compute GC-space world matrices for each bone.
+
+        This mirrors BModel.CreateBones: world = parent_world @ FrameMatrix(frame).
+        Uses the rotation SHORT values (via round-trip through JntEntry) to match
+        the exact precision of the original game tool.
+        """
+        from mathutils import Euler as _Euler
+        from math import pi
+
+        world_matrices = [None] * len(jnt.frames)
+
+        def _frame_matrix(f):
+            # Use raw translation floats if available (preserves -0.0)
+            tx = getattr(f, '_raw_tx', f.t.x)
+            ty = getattr(f, '_raw_ty', f.t.y)
+            tz = getattr(f, '_raw_tz', f.t.z)
+            t = Matrix.Translation((tx, ty, tz))
+            # Convert radians back to shorts and then to radians again
+            # to match the precision loss of the original SHORT encoding
+            rx_short = round(f.rx * 32768.0 / pi)
+            ry_short = round(f.ry * 32768.0 / pi)
+            rz_short = round(f.rz * 32768.0 / pi)
+            rx_rad = rx_short / 32768.0 * pi
+            ry_rad = ry_short / 32768.0 * pi
+            rz_rad = rz_short / 32768.0 * pi
+            r = _Euler((rx_rad, ry_rad, rz_rad), 'XYZ').to_matrix().to_4x4()
+            return t @ r
+
+        def _walk(sg, parent_mtx):
+            eff = parent_mtx.copy()
+            if sg.type == 0x10:  # joint node
+                f = jnt.frames[sg.index]
+                eff = parent_mtx @ _frame_matrix(f)
+                world_matrices[sg.index] = eff
+            for child in sg.children:
+                _walk(child, eff)
+
+        _walk(inf.rootSceneGraph, Matrix.Identity(4))
+        return world_matrices
+
+    def BuildFromMesh(self, armature_obj, mesh_obj, jnt=None, inf=None):
         """Build EVP1 envelope/skinning data from Blender armature and mesh.
 
-        Computes inverse bind matrices for each bone and collects unique
-        multi-bone envelope entries from mesh vertex groups.
+        If jnt and inf are provided, computes inverse bind matrices by walking
+        the INF1 scene graph (matching the import path exactly). Otherwise
+        falls back to gc_rest_* properties on bones.
         """
         bones = armature_obj.data.bones
         bone_names = [b.name for b in bones]
@@ -144,23 +229,33 @@ class Evp1:
         mesh = mesh_obj.data
 
         # --- Inverse bind matrices (one per bone) ---
-        # bone.matrix_local is the bone's rest-pose world matrix in Blender space.
-        # Convert to GC space, then invert to get the inverse bind matrix.
-        self.matrices = [None] * num_bones
-        for i, bone in enumerate(bones):
-            gc_world = Evp1._blender_to_gc_matrix(bone.matrix_local)
-            inv_bind = gc_world.inverted()
-            self.matrices[i] = inv_bind
+        if jnt is not None and inf is not None:
+            # Compute world matrices by walking scene graph (same as CreateBones)
+            world_matrices = Evp1._compute_world_matrices_from_scenegraph(jnt, inf)
+            self.matrices = [None] * num_bones
+            for i in range(num_bones):
+                if world_matrices[i] is not None:
+                    self.matrices[i] = world_matrices[i].inverted()
+                else:
+                    self.matrices[i] = Matrix.Identity(4)
+        else:
+            has_gc_props = len(bones) > 0 and "gc_rest_rx" in bones[0]
+            bones_by_name = {b.name: b for b in bones}
+            self.matrices = [None] * num_bones
+            for i, bone in enumerate(bones):
+                if has_gc_props:
+                    gc_world = Evp1._gc_world_matrix_from_props(bone, bones_by_name)
+                else:
+                    gc_world = Evp1._blender_to_gc_matrix(bone.matrix_local)
+                self.matrices[i] = gc_world.inverted()
 
         # --- Envelope entries (unique multi-bone weight sets) ---
-        # Map vertex group index -> bone index
         vgroup_to_bone = {}
         for vg in mesh_obj.vertex_groups:
             if vg.name in bone_names:
                 vgroup_to_bone[vg.index] = bone_names.index(vg.name)
 
-        # Collect unique envelopes from vertices with 2+ bones
-        envelope_map = {}  # frozen key -> MultiMatrix index
+        envelope_map = {}
         self.weightedIndices = []
 
         for vert in mesh.vertices:
@@ -169,14 +264,12 @@ class Evp1:
             if len(sig_groups) < 2:
                 continue
 
-            # Normalize weights
             total = sum(w for _, w in sig_groups)
             if total < 1e-6:
                 continue
             normalized = [(vgroup_to_bone[gi], w / total) for gi, w in sig_groups]
-            normalized.sort(key=lambda x: x[0])  # sort by bone index for consistency
+            normalized.sort(key=lambda x: x[0])
 
-            # Create dedup key: (bone_idx, rounded_weight) tuples
             key = tuple((bi, round(w, 6)) for bi, w in normalized)
             if key not in envelope_map:
                 mm = MultiMatrix()
@@ -185,14 +278,8 @@ class Evp1:
                 envelope_map[key] = len(self.weightedIndices)
                 self.weightedIndices.append(mm)
 
-        self._rawSectionData = None  # force DumpData reconstruction
-
     def DumpData(self, bw):
-        """Write EVP1 section. If raw data was captured during import, write it back."""
-        if hasattr(self, '_rawSectionData') and self._rawSectionData is not None:
-            bw._f.write(self._rawSectionData)
-            return
-
+        """Write EVP1 section."""
         evp1Offset = bw.Position()
 
         header = Evp1Header()
@@ -203,16 +290,15 @@ class Evp1:
         countsum = sum(counts)
         header.pad = 0xffff
 
-        header.offsets[0] = bw.addPadding(Evp1Header.size)
+        header.offsets[0] = Evp1Header.size  # No padding after header
         header.offsets[1] = header.offsets[0] + header.count
-        header.offsets[2] = header.offsets[1] + 2 * countsum
+        raw_weight_off = header.offsets[1] + 2 * countsum
+        header.offsets[2] = (raw_weight_off + 3) & ~3  # 4-byte align for floats
         header.offsets[3] = header.offsets[2] + 4 * countsum
         header.sizeOfSection = header.offsets[3] + numMatrices * 12 * 4
         header.sizeOfSection = bw.addPadding(header.sizeOfSection)
 
         header.DumpData(bw)
-
-        bw.writePadding(header.offsets[0] - Evp1Header.size)
 
         for i in range(header.count):
             bw.writeByte(counts[i])
@@ -221,6 +307,11 @@ class Evp1:
         for i in range(header.count):
             for j in range(counts[i]):
                 bw.writeWord(self.weightedIndices[i].indices[j])
+
+        # Pad to 4-byte alignment before weights
+        pad_needed = (evp1Offset + header.offsets[2]) - bw.Position()
+        if pad_needed > 0:
+            bw.writePadding(pad_needed)
 
         # write weights of weighted matrices
         for i in range(header.count):
