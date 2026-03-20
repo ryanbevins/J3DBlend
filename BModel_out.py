@@ -174,6 +174,20 @@ def _rebuild_inf1(bmodel, mesh_obj, shp, drw):
     batch_mat_indices = getattr(shp, '_batch_material_indices',
                                 list(range(len(shp.batches))))
 
+    # Convert Blender material slot indices to INF1 Material node indices.
+    # During import, each Blender material stores its original INF1 node index
+    # as a custom property. The INF1 Material node's index must match the MAT3
+    # entry index (not the Blender slot index) for correct texture assignment.
+    mesh = mesh_obj.data
+    blender_to_inf1_mat = {}
+    for slot_idx, mat in enumerate(mesh.materials):
+        if mat and "gc_inf1_mat_node_index" in mat:
+            blender_to_inf1_mat[slot_idx] = mat["gc_inf1_mat_node_index"]
+    if blender_to_inf1_mat:
+        batch_mat_indices = [
+            blender_to_inf1_mat.get(mi, mi) for mi in batch_mat_indices
+        ]
+
     # Count total packets and vertices
     total_packets = sum(len(b.packets) for b in shp.batches)
     num_vertices = len(bmodel.vtx.positions) if hasattr(bmodel.vtx, 'positions') else 0

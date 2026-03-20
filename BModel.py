@@ -809,6 +809,7 @@ class BModel:
                 self._currMaterial.name = self._mat1.stringtable[n.index]
 
                 # Store GC material data as custom properties for BMD export
+                self._currMaterial["gc_inf1_mat_node_index"] = n.index
                 self._currMaterial["gc_mat_index"] = self._mat1.indexToMatIndex[n.index]
                 self._currMaterial["gc_mat_flag"] = mat.flag
                 self._currMaterial["gc_mat_cullIndex"] = mat.cullIndex
