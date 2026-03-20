@@ -152,6 +152,47 @@ def _extract_batch_material_order(inf):
     return result
 
 
+def _rebuild_inf1(bmodel, mesh_obj, shp, drw):
+    """Rebuild INF1 from reconstructed SHP1 data and armature hierarchy.
+
+    Extracts batch_info (is_rigid, drw_idx) from SHP1 batches, then calls
+    Inf1.Rebuild to produce a new scene graph matching the batch ordering.
+    """
+    # Build batch_info: (is_rigid, first_drw_idx_or_None) per batch
+    batch_info = []
+    for batch in shp.batches:
+        is_rigid = getattr(batch, '_is_rigid', not batch.attribs.hasMatrixIndices)
+        drw_idx = None
+        if is_rigid and batch.packets:
+            # Rigid batch: first matrix table entry is the DRW1 index
+            mt = batch.packets[0].matrixTable
+            if mt:
+                drw_idx = mt[0]
+        batch_info.append((is_rigid, drw_idx))
+
+    # Get batch->material mapping from SHP1
+    batch_mat_indices = getattr(shp, '_batch_material_indices',
+                                list(range(len(shp.batches))))
+
+    # Count total packets and vertices
+    total_packets = sum(len(b.packets) for b in shp.batches)
+    num_vertices = len(bmodel.vtx.positions) if hasattr(bmodel.vtx, 'positions') else 0
+
+    # Find armature
+    armature_obj = None
+    if mesh_obj.parent and mesh_obj.parent.type == 'ARMATURE':
+        armature_obj = mesh_obj.parent
+
+    new_inf = Inf1.Inf1.Rebuild(
+        batch_mat_indices, num_vertices, total_packets,
+        old_inf=bmodel.inf,
+        batch_info=batch_info, drw1=drw, armature_obj=armature_obj)
+
+    log.info("Rebuilt INF1: %d batches, %d packets, %d vertices",
+             len(shp.batches), total_packets, num_vertices)
+    bmodel.inf = new_inf
+
+
 def reconstruct_mesh_sections(bmodel):
     """Rebuild VTX1 and SHP1 from the current Blender mesh.
 
@@ -201,7 +242,8 @@ def reconstruct_mesh_sections(bmodel):
         mesh_obj, new_vtx, loop_indices, bmodel.drw, batch_order=batch_order, evp1=evp)
     bmodel.shp = new_shp
 
-    # INF1 is NOT touched — it stays as the raw data from import.
+    # Rebuild INF1 from the new SHP1 batch data and armature hierarchy
+    _rebuild_inf1(bmodel, mesh_obj, new_shp, drw)
 
 
 def export_bmd(filepath, bmodel, force_reconstruct=False):

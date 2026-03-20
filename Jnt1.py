@@ -231,6 +231,102 @@ class Jnt1:
             self.matrices.append(None)
             self.isMatrixValid.append(False)
 
+    @staticmethod
+    def BuildFromArmature(armature_obj):
+        """Build JNT1 purely from Blender armature rest pose data.
+
+        Does NOT rely on gc_* custom properties. Computes local transforms
+        from bone.matrix_local, converts from Blender Z-up to GC Y-up
+        coordinate space, and returns a Jnt1 with frames populated.
+        """
+        import math
+
+        # Blender-to-Nintendo coordinate conversion matrix:
+        # Blender (x, y, z) Z-up -> GC (x, z, -y) Y-up
+        BtoN = Matrix([[1, 0, 0, 0],
+                        [0, 0, 1, 0],
+                        [0, -1, 0, 0],
+                        [0, 0, 0, 1]])
+
+        def _radians_to_s16(rad):
+            """Convert radians to GC s16 rotation format."""
+            val = int(round(rad * 32768.0 / math.pi))
+            # Clamp to s16 range
+            if val > 32767:
+                val = 32767
+            elif val < -32768:
+                val = -32768
+            return val
+
+        def _collect_bones_dfs(armature):
+            """Collect bones in depth-first order matching BMD convention."""
+            bones = armature.data.bones
+            result = []
+            roots = [b for b in bones if b.parent is None]
+            def _recurse(bone):
+                result.append(bone)
+                for child in bone.children:
+                    _recurse(child)
+            for root in roots:
+                _recurse(root)
+            return result
+
+        jnt = Jnt1()
+        jnt._rawSectionData = None  # force DumpData reconstruction
+        jnt.frames = []
+        jnt.matrices = []
+        jnt.isMatrixValid = []
+
+        ordered_bones = _collect_bones_dfs(armature_obj)
+
+        for bone in ordered_bones:
+            # Compute local transform in Blender space
+            if bone.parent is not None:
+                local_mtx = bone.parent.matrix_local.inverted() @ bone.matrix_local
+            else:
+                local_mtx = bone.matrix_local.copy()
+
+            # Convert to GC coordinate space
+            # For root: gc_local = BtoN @ blender_local @ BtoN^-1
+            # For children: same — the parent-relative transform needs basis change
+            gc_local = BtoN @ local_mtx @ BtoN.inverted()
+
+            # Decompose into translation, rotation, scale
+            loc, quat, scale = gc_local.decompose()
+            euler = quat.to_euler('XYZ')
+
+            f = JntFrame()
+            f.name = bone.name
+
+            # Scale
+            f.sx = scale.x
+            f.sy = scale.y
+            f.sz = scale.z
+
+            # Rotation in radians (JntFrame stores radians; JntEntry.FromFrame converts to s16)
+            f.rx = euler.x
+            f.ry = euler.y
+            f.rz = euler.z
+
+            # Translation
+            f.t = Vector((loc.x, loc.y, loc.z))
+
+            # Bounding box defaults
+            f._bbMin = [0.0, 0.0, 0.0]
+            f._bbMax = [0.0, 0.0, 0.0]
+
+            # Default JntEntry fields
+            f.matrix_type = 0
+            f.jnt_pad = 0x00ff
+            f.jnt_pad2 = 0xffff
+            f.jnt_unknown2 = 0.0
+
+            jnt.frames.append(f)
+            jnt.matrices.append(None)
+            jnt.isMatrixValid.append(False)
+
+        return jnt
+
     def LoadData(self, br):
 
         jnt1Offset = br.Position()

@@ -1,5 +1,6 @@
 #! /usr/bin/python3
 import re
+import struct
 import logging
 log = logging.getLogger('bpy.ops.import_mesh.bmd.tex1')
 
@@ -278,6 +279,37 @@ class Tex1:
         # Write string table
         bw.WriteStringTable(self.stringtable)
 
+        # Write image data if present (from BuildFromImages)
+        imageDataList = getattr(self, '_imageData', None)
+        if imageDataList and len(imageDataList) == numImages:
+            # Pad to 32-byte alignment before image data
+            rawPos = bw.Position() - tex1Offset
+            padTo32 = ((rawPos + 31) // 32) * 32
+            if padTo32 > rawPos:
+                bw.writePadding(padTo32 - rawPos)
+
+            imageDataStart = bw.Position() - tex1Offset
+
+            # Write each image's encoded data and record offsets
+            dataOffsets = []
+            for imgData in imageDataList:
+                dataOffsets.append(bw.Position() - tex1Offset)
+                bw._f.write(imgData)
+
+            # Patch dataOffset in each texture header
+            # Headers start at textureHeaderOffset, each is 32 bytes
+            # dataOffset is at byte 28 within each header
+            for i, offset in enumerate(dataOffsets):
+                # dataOffset is relative to the start of the texture header entry
+                headerPos = tex1Offset + textureHeaderOffset + i * TextureHeader.size
+                relOffset = offset - (textureHeaderOffset + i * TextureHeader.size)
+                bw.SeekSet(headerPos + 28)  # dataOffset field at offset 28
+                bw.writeDword(relOffset)
+
+            # Seek to end of last image data
+            endPos = dataOffsets[-1] + len(imageDataList[-1])
+            bw.SeekSet(tex1Offset + endPos)
+
         # Pad to 32-byte alignment
         rawSize = bw.Position() - tex1Offset
         sectionSize = ((rawSize + 31) // 32) * 32
@@ -331,3 +363,111 @@ class Tex1:
                 seen[name] = len(self.texHeaders)
                 self.texHeaders.append(th)
                 self.stringtable.append(name)
+
+    @staticmethod
+    def _encode_rgba8(pixels, width, height):
+        """Encode RGBA pixel data to GC RGBA8 tile format.
+
+        RGBA8 (format 6): 4x4 tiles, each tile is 64 bytes.
+        First 32 bytes: AR values (row by row within the 4x4 tile)
+        Last 32 bytes: GB values (row by row within the 4x4 tile)
+
+        Args:
+            pixels: flat list/array of RGBA floats (0.0-1.0), length = width*height*4
+            width: image width in pixels
+            height: image height in pixels
+
+        Returns bytes of the encoded image data.
+        """
+        # Pad dimensions to multiples of 4
+        pad_w = ((width + 3) // 4) * 4
+        pad_h = ((height + 3) // 4) * 4
+
+        data = bytearray()
+
+        for ty in range(0, pad_h, 4):
+            for tx in range(0, pad_w, 4):
+                ar_block = bytearray(32)
+                gb_block = bytearray(32)
+
+                for row in range(4):
+                    for col in range(4):
+                        px = tx + col
+                        py = ty + row
+
+                        if px < width and py < height:
+                            idx = (py * width + px) * 4
+                            r = int(pixels[idx + 0] * 255 + 0.5)
+                            g = int(pixels[idx + 1] * 255 + 0.5)
+                            b = int(pixels[idx + 2] * 255 + 0.5)
+                            a = int(pixels[idx + 3] * 255 + 0.5)
+                            r = max(0, min(255, r))
+                            g = max(0, min(255, g))
+                            b = max(0, min(255, b))
+                            a = max(0, min(255, a))
+                        else:
+                            r = g = b = a = 0
+
+                        offset = row * 4 + col
+                        ar_block[offset * 2 + 0] = a
+                        ar_block[offset * 2 + 1] = r
+                        gb_block[offset * 2 + 0] = g
+                        gb_block[offset * 2 + 1] = b
+
+                data.extend(ar_block)
+                data.extend(gb_block)
+
+        return bytes(data)
+
+    def BuildFromImages(self, images):
+        """Build TEX1 from Blender image objects.
+
+        Encodes each image in RGBA8 format (GC format 6). Sets up texture
+        headers, string table, and encoded image data.
+
+        Args:
+            images: list of (name, blender_image) tuples. Each blender_image
+                    must have .pixels, .size[0] (width), .size[1] (height).
+
+        Sets _rawSectionData = None to force DumpData reconstruction path.
+        Sets _imageData list with encoded bytes per texture.
+        """
+        self.texHeaders = []
+        self.stringtable = []
+        self._imageData = []
+        self._rawSectionData = None
+
+        for name, img in images:
+            width = img.size[0]
+            height = img.size[1]
+
+            # Get pixel data as flat list of RGBA floats
+            pixels = list(img.pixels)
+
+            # Encode as RGBA8
+            encoded = Tex1._encode_rgba8(pixels, width, height)
+
+            th = TextureHeader()
+            th.format = 6  # RGBA8
+            th.unknown = 1  # alpha flag
+            th.width = width
+            th.height = height
+            th.wrapS = 1  # repeat
+            th.wrapT = 1  # repeat
+            th.unknown3 = 0
+            th.paletteFormat = 0
+            th.paletteNumEntries = 0
+            th.paletteOffset = 0
+            th.unknown5 = 0
+            th.unknown6 = (1 << 8) | 1  # min/mag filter: linear
+            th.unknown7 = 0
+            th.mipmapCount = 1
+            th.unknown8 = 0
+            th.unknown9 = 0
+            th.dataOffset = 0  # filled in during DumpData
+
+            self.texHeaders.append(th)
+            self.stringtable.append(name)
+            self._imageData.append(encoded)
+
+        log.info("TEX1 BuildFromImages: %d textures", len(self.texHeaders))

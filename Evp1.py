@@ -108,6 +108,85 @@ class Evp1:
                 for k in range(4):
                     self.matrices[i][j][k] = br.GetFloat()
 
+    @staticmethod
+    def _blender_to_gc_matrix(blender_mtx):
+        """Convert a Blender Z-up 4x4 matrix to GC Y-up coordinate space.
+
+        Blender (x, y, z) -> GC (x, z, -y).
+        This is a similarity transform: M_gc = S @ M_bl @ S^-1
+        where S swaps Y/Z and negates the new Y (old Z).
+        """
+        # Swap matrix: maps Blender coords to GC coords
+        # GC.x = Bl.x, GC.y = Bl.z, GC.z = -Bl.y
+        S = Matrix((
+            (1,  0,  0, 0),
+            (0,  0,  1, 0),
+            (0, -1,  0, 0),
+            (0,  0,  0, 1),
+        ))
+        S_inv = Matrix((
+            (1, 0,  0, 0),
+            (0, 0, -1, 0),
+            (0, 1,  0, 0),
+            (0, 0,  0, 1),
+        ))
+        return S @ blender_mtx @ S_inv
+
+    def BuildFromMesh(self, armature_obj, mesh_obj):
+        """Build EVP1 envelope/skinning data from Blender armature and mesh.
+
+        Computes inverse bind matrices for each bone and collects unique
+        multi-bone envelope entries from mesh vertex groups.
+        """
+        bones = armature_obj.data.bones
+        bone_names = [b.name for b in bones]
+        num_bones = len(bone_names)
+        mesh = mesh_obj.data
+
+        # --- Inverse bind matrices (one per bone) ---
+        # bone.matrix_local is the bone's rest-pose world matrix in Blender space.
+        # Convert to GC space, then invert to get the inverse bind matrix.
+        self.matrices = [None] * num_bones
+        for i, bone in enumerate(bones):
+            gc_world = Evp1._blender_to_gc_matrix(bone.matrix_local)
+            inv_bind = gc_world.inverted()
+            self.matrices[i] = inv_bind
+
+        # --- Envelope entries (unique multi-bone weight sets) ---
+        # Map vertex group index -> bone index
+        vgroup_to_bone = {}
+        for vg in mesh_obj.vertex_groups:
+            if vg.name in bone_names:
+                vgroup_to_bone[vg.index] = bone_names.index(vg.name)
+
+        # Collect unique envelopes from vertices with 2+ bones
+        envelope_map = {}  # frozen key -> MultiMatrix index
+        self.weightedIndices = []
+
+        for vert in mesh.vertices:
+            sig_groups = [(g.group, g.weight) for g in vert.groups
+                          if g.weight > 0.001 and g.group in vgroup_to_bone]
+            if len(sig_groups) < 2:
+                continue
+
+            # Normalize weights
+            total = sum(w for _, w in sig_groups)
+            if total < 1e-6:
+                continue
+            normalized = [(vgroup_to_bone[gi], w / total) for gi, w in sig_groups]
+            normalized.sort(key=lambda x: x[0])  # sort by bone index for consistency
+
+            # Create dedup key: (bone_idx, rounded_weight) tuples
+            key = tuple((bi, round(w, 6)) for bi, w in normalized)
+            if key not in envelope_map:
+                mm = MultiMatrix()
+                mm.indices = [bi for bi, w in normalized]
+                mm.weights = [w for bi, w in normalized]
+                envelope_map[key] = len(self.weightedIndices)
+                self.weightedIndices.append(mm)
+
+        self._rawSectionData = None  # force DumpData reconstruction
+
     def DumpData(self, bw):
         """Write EVP1 section. If raw data was captured during import, write it back."""
         if hasattr(self, '_rawSectionData') and self._rawSectionData is not None:

@@ -272,6 +272,44 @@ class Inf1:
         inf.rootSceneGraph = root
         return inf
 
+    @staticmethod
+    def BuildFromScene(armature_obj, mesh_obj, shp1, drw1):
+        """Build INF1 from Blender scene data and a reconstructed SHP1.
+
+        Convenience wrapper around Rebuild that extracts batch_info and
+        material indices from SHP1 batches.
+
+        Args:
+            armature_obj: Blender armature object (or None for no skeleton)
+            mesh_obj: Blender mesh object (used for vertex count)
+            shp1: Shp1 instance with batches already built
+            drw1: Drw1 instance
+
+        Returns a new Inf1 instance with _rawSectionData = None.
+        """
+        # Extract batch_info from SHP1
+        batch_info = []
+        for batch in shp1.batches:
+            is_rigid = getattr(batch, '_is_rigid', not batch.attribs.hasMatrixIndices)
+            drw_idx = None
+            if is_rigid and batch.packets:
+                mt = batch.packets[0].matrixTable
+                if mt:
+                    drw_idx = mt[0]
+            batch_info.append((is_rigid, drw_idx))
+
+        batch_mat_indices = getattr(shp1, '_batch_material_indices',
+                                    list(range(len(shp1.batches))))
+
+        total_packets = sum(len(b.packets) for b in shp1.batches)
+
+        # Vertex count from mesh
+        num_vertices = len(mesh_obj.data.vertices) if mesh_obj else 0
+
+        return Inf1.Rebuild(
+            batch_mat_indices, num_vertices, total_packets,
+            batch_info=batch_info, drw1=drw1, armature_obj=armature_obj)
+
     def DumpData(self, bw):
         """Write INF1 section. If raw data was captured during import, write it back."""
         if self._rawSectionData is not None:
