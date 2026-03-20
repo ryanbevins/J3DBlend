@@ -204,6 +204,14 @@ class ImportBmd(Operator, ImportHelper):
         default=False
     )
 
+    simplify_tev: BoolProperty(
+        name="Simplify TEV to presets",
+        description="Snap each material's TEV stages to the closest matching preset "
+                    "(Textured, Textured+VtxColor, etc.). Makes materials editable "
+                    "via the preset system. Disable to preserve exact original TEV stages.",
+        default=False
+    )
+
     ALL_PARAMS = ['use_nodes', 'imtype', 'tx_pck', 'import_anims', 'import_anims_type', 'anim_rot_smallest',
                   'nat_bn', 'ic_sc', 'frc_cr_bn', 'boneThickness', 'dvg', 'val_msh', 'paranoia', 'no_rot_cv']
 
@@ -227,6 +235,19 @@ class ImportBmd(Operator, ImportHelper):
 
             try:
                 temp.Import(fname, **{x: getattr(self, x) for x in self.ALL_PARAMS})
+
+                # Simplify TEV stages to presets if requested
+                if self.simplify_tev:
+                    from . import tev_panel
+                    for mat in bpy.data.materials:
+                        if tev_panel._get(mat, "gc_tev_stageCount") is not None:
+                            preset = tev_panel.detect_preset(mat)
+                            if preset != "Custom":
+                                tev_panel.apply_preset(mat, preset)
+                                log.info("Simplified material '%s' to preset '%s'", mat.name, preset)
+                            else:
+                                log.info("Material '%s' has custom TEV stages, not simplified", mat.name)
+
             except Exception as err:
                 log.critical('An error happened. If it wasn\'t reported before, here it is: %s', err)
                 retcode = 'ERROR'
