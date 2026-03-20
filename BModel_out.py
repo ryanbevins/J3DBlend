@@ -215,32 +215,11 @@ def reconstruct_mesh_sections(bmodel):
     if mesh_obj.parent and mesh_obj.parent.type == 'ARMATURE':
         armature_obj = mesh_obj.parent
 
-    # --- Rebuild JNT1 from Blender armature ---
-    if armature_obj is not None:
-        from . import Jnt1
-        new_jnt = Jnt1.Jnt1.BuildFromArmature(armature_obj)
-        bmodel.jnt = new_jnt
-        log.info("Rebuilt JNT1: %d bones", len(new_jnt.frames))
-
-    # --- Rebuild EVP1 from mesh vertex groups + armature ---
-    if armature_obj is not None:
-        from . import Evp1
-        new_evp = Evp1.Evp1()
-        new_evp.BuildFromMesh(armature_obj, mesh_obj)
-        bmodel.evp = new_evp
-        log.info("Rebuilt EVP1: %d envelopes, %d inverse bind matrices",
-                 len(new_evp.weightedIndices), len(new_evp.matrices))
-
-    # --- Rebuild DRW1 from mesh vertex groups + EVP1 ---
-    if armature_obj is not None:
-        from . import Drw1
-        new_drw = Drw1.Drw1()
-        new_drw.BuildFromMesh(armature_obj, mesh_obj, bmodel.evp)
-        bmodel.drw = new_drw
-        log.info("Rebuilt DRW1: %d entries (%d rigid, %d weighted)",
-                 len(new_drw.data),
-                 sum(1 for w in new_drw.isWeighted if not w),
-                 sum(1 for w in new_drw.isWeighted if w))
+    # JNT1, EVP1, DRW1: Use raw import data for now.
+    # The from-scratch builders (BuildFromArmature, BuildFromMesh) exist but
+    # produce coordinate conversion differences that cause deformation.
+    # These need debugging before they can replace the raw path.
+    # For imported models, the raw data is correct and byte-identical.
 
     jnt = bmodel.jnt
     drw = bmodel.drw
